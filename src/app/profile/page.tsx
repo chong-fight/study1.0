@@ -269,7 +269,7 @@ export default function ProfilePage() {
               <div className="setting-row">
                 <div>
                   <h3>{track.label} · 复习</h3>
-                  <p>超出上限的内容会稳定顺延到下一日</p>
+                  <p>超出上限时先复习最早到期内容，再在同批次中轮换</p>
                 </div>
                 <Stepper
                   value={settings[key]}

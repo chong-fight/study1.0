@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import localFont from "next/font/local";
 import "./globals.css";
 import BottomNav from "@/components/BottomNav";
+import LocalPreviewSeed from "@/components/LocalPreviewSeed";
 import ServiceWorker from "@/components/ServiceWorker";
 
 const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
@@ -49,6 +50,7 @@ export default function RootLayout({
         <div className="app-frame">
           <div className="app-content">{children}</div>
           <BottomNav />
+          <LocalPreviewSeed />
           <ServiceWorker />
         </div>
       </body>

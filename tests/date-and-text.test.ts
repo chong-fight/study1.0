@@ -10,6 +10,7 @@ import {
   isAcceptedPhrase,
   makeContentKey,
   normalizePhrase,
+  seededShuffle,
 } from "@/lib/domain/text";
 
 describe("local date helpers", () => {
@@ -48,5 +49,13 @@ describe("text matching", () => {
     expect(isAcceptedPhrase("Take part in", "take part in")).toBe(true);
     expect(isAcceptedPhrase("take  part in", "take part in")).toBe(true);
     expect(isAcceptedPhrase("take in", "take part in")).toBe(false);
+  });
+
+  it("shuffles by a stable round seed instead of the learning-list order", () => {
+    const items = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    const first = seededShuffle(items, "2026-01-01:fixed:meaning:0");
+    const repeated = seededShuffle(items, "2026-01-01:fixed:meaning:0");
+    expect(first).toEqual(repeated);
+    expect(first).not.toEqual(items);
   });
 });

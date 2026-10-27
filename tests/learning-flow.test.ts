@@ -62,4 +62,15 @@ describe("new learning selection", () => {
       [],
     );
   });
+
+  it("keeps higher-priority phrases ahead while shuffling inside a priority", () => {
+    const items = [
+      { ...phrase("fixed:p3", "priority three"), priority: 3 },
+      { ...phrase("fixed:p1-a", "priority one a"), priority: 1 },
+      { ...phrase("fixed:p1-b", "priority one b"), priority: 1 },
+    ];
+    const selected = selectNewPhrases(items, new Set(), 3, new Set(), () => 0);
+    expect(selected.slice(0, 2).every((item) => item.priority === 1)).toBe(true);
+    expect(selected[2].priority).toBe(3);
+  });
 });

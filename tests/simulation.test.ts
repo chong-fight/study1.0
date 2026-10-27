@@ -3,7 +3,7 @@ import { DEFAULT_SETTINGS, GRADE_ORDER } from "@/lib/domain/constants";
 import { addDays, daysBetween } from "@/lib/domain/date";
 import {
   createInitialReviewState,
-  reviewUrgency,
+  compareReviewPriority,
   updateReviewSchedule,
 } from "@/lib/domain/scheduler";
 import type { Grade, ReviewQuality, ReviewState, TrackId } from "@/lib/domain/types";
@@ -63,7 +63,7 @@ describe("120-day accelerated use", () => {
         "verb-pattern": 0,
       };
       const sorted = [...due].sort(
-        (left, right) => reviewUrgency(right, date) - reviewUrgency(left, date),
+        (left, right) => compareReviewPriority(left, right, date),
       );
       const selected: SimCard[] = [];
       for (const card of sorted) {
@@ -115,5 +115,90 @@ describe("120-day accelerated use", () => {
     expect(neverReviewed).toHaveLength(0);
     expect(maxFirstReviewWait).toBeLessThanOrEqual(7);
     expect(validGrades).toBe(true);
+  });
+});
+
+describe("full 926-card word bank", () => {
+  it("keeps a year of daily use inside the shared review capacity", () => {
+    const cards: SimCard[] = [];
+    let date = "2026-01-01";
+    let serial = 0;
+
+    for (let day = 0; day < 93; day += 1) {
+      const remaining = 926 - cards.length;
+      const fixedToAdd = Math.min(6, remaining);
+      const verbToAdd = Math.min(4, remaining - fixedToAdd);
+      for (let item = 0; item < fixedToAdd; item += 1) {
+        serial += 1;
+        const state = createInitialReviewState(
+          `fixed:full-${serial}`,
+          "fixed",
+          item % 3 === 0 ? "C" : "B",
+          date,
+          serial,
+        );
+        cards.push({
+          ...state,
+          nextReviewOn: addDays(date, 1),
+          everReviewed: false,
+          firstDueOn: addDays(date, 1),
+        });
+      }
+      for (let item = 0; item < verbToAdd; item += 1) {
+        serial += 1;
+        const state = createInitialReviewState(
+          `verb-pattern:full-${serial}`,
+          "verb-pattern",
+          item % 2 === 0 ? "C" : "B",
+          date,
+          serial,
+        );
+        cards.push({
+          ...state,
+          nextReviewOn: addDays(date, 1),
+          everReviewed: false,
+          firstDueOn: addDays(date, 1),
+        });
+      }
+      date = addDays(date, 1);
+    }
+
+    date = "2026-01-02";
+    for (let day = 0; day < 365; day += 1) {
+      const due = cards
+        .filter((card) => card.nextReviewOn <= date)
+        .sort((left, right) => compareReviewPriority(left, right, date));
+      const selected = due.slice(0, 50);
+      const selectedIds = new Set(selected.map((card) => card.phraseId));
+      for (const card of due) {
+        if (!selectedIds.has(card.phraseId)) card.deferralCount += 1;
+      }
+      for (const card of selected) {
+        card.everReviewed = true;
+        card.firstReviewedOn ??= date;
+        const signal = (serial + cards.indexOf(card) * 11 + day * 7) % 100;
+        const quality: ReviewQuality = signal < 8 ? 0 : signal < 22 ? 3 : 4;
+        Object.assign(
+          card,
+          updateReviewSchedule(card, quality, date, day + serial),
+        );
+      }
+      date = addDays(date, 1);
+    }
+
+    const neverReviewed = cards.filter((card) => !card.everReviewed);
+    const maxFirstReviewWait = Math.max(
+      ...cards.map((card) =>
+        daysBetween(card.firstDueOn, card.firstReviewedOn ?? date),
+      ),
+    );
+    console.log({
+      fullDeckCards: cards.length,
+      neverReviewed: neverReviewed.length,
+      maxFirstReviewWait,
+    });
+    expect(cards).toHaveLength(926);
+    expect(neverReviewed).toHaveLength(0);
+    expect(maxFirstReviewWait).toBeLessThanOrEqual(7);
   });
 });

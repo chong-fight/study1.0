@@ -1,9 +1,16 @@
 import { DEFAULT_EXERCISE_MODES, TRACKS } from "@/lib/domain/constants";
-import { makeContentKey, makePhraseId, normalizePhrase } from "@/lib/domain/text";
+import {
+  makeContentKey,
+  makePhraseId,
+  normalizeChinese,
+  normalizePhrase,
+} from "@/lib/domain/text";
 import type {
   ContentStatus,
   ExerciseMode,
+  MeaningSense,
   Phrase,
+  PhraseExample,
   Synonym,
   TrackId,
 } from "@/lib/domain/types";
@@ -87,7 +94,7 @@ export function normalizeImportJson(
     }
 
     const phraseText = stringValue(phrase.phrase).trim();
-    const meaning = stringValue(phrase.meaning).trim();
+    const sourceMeaning = stringValue(phrase.meaning).trim();
     if (!phraseText) {
       errors.push({
         row: rowNumber,
@@ -97,7 +104,7 @@ export function normalizeImportJson(
       });
       return;
     }
-    if (!meaning) {
+    if (!sourceMeaning) {
       errors.push({
         row: rowNumber,
         field: "meaning",
@@ -106,6 +113,13 @@ export function normalizeImportJson(
       });
       return;
     }
+    const senses = normalizeMeaningSenses(
+      phrase.senses ?? phrase.otherMeanings,
+      sourceMeaning,
+    );
+    const primarySense =
+      senses.find((item) => item.primary) ?? senses[0];
+    const meaning = primarySense?.meaning || sourceMeaning;
 
     const id = makePhraseId(trackId, phraseText);
     if (seen.has(id)) {
@@ -126,6 +140,28 @@ export function normalizeImportJson(
       stringValue(phrase.exampleZh) ||
         stringValue(phrase.example_translation),
     );
+    const declaredQuizExampleEn = cleanSentence(
+      stringValue(phrase.quizExampleEn) ||
+        stringValue(phrase.quizExample),
+    );
+    const declaredQuizExampleZh = cleanSentence(
+      stringValue(phrase.quizExampleZh),
+    );
+    const exampleVariants = normalizeExampleVariants({
+      raw: phrase.exampleVariants ?? phrase.examples,
+      exampleEn,
+      exampleZh,
+      quizExampleEn: declaredQuizExampleEn,
+      quizExampleZh: declaredQuizExampleZh,
+    });
+    const quizExampleEn =
+      exampleVariants[1]?.exampleEn || declaredQuizExampleEn;
+    const quizExampleZh =
+      exampleVariants[1]?.exampleZh || declaredQuizExampleZh;
+    const primaryExampleIndexes = normalizePrimaryExampleIndexes(
+      phrase.primaryExampleIndexes,
+      exampleVariants.length,
+    );
     if (!exampleEn) missingExamples += 1;
     if (exampleEn && !exampleZh) missingTranslations += 1;
 
@@ -145,7 +181,13 @@ export function normalizeImportJson(
       Boolean(exampleEn) &&
       exampleEn.toLowerCase().includes(phraseText.toLowerCase());
     if (supportsCloze) clozeReady += 1;
-    const contentStatus = getContentStatus(exampleEn, exampleZh);
+    const contentStatus = getContentStatus(
+      exampleEn,
+      exampleZh,
+      exampleVariants,
+      senses,
+      primaryExampleIndexes,
+    );
 
     phrases.push({
       id,
@@ -158,8 +200,13 @@ export function normalizeImportJson(
       phrase: phraseText,
       normalizedPhrase,
       meaning,
+      senses,
       exampleEn,
       exampleZh,
+      quizExampleEn: quizExampleEn || undefined,
+      quizExampleZh: quizExampleZh || undefined,
+      exampleVariants,
+      primaryExampleIndexes,
       entryType: stringValue(phrase.entryType) || inferEntryType(trackId),
       category: stringValue(phrase.category) || "其他",
       tags: normalizeTags(phrase.tags),
@@ -233,6 +280,112 @@ function cleanSentence(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function normalizeMeaningSenses(
+  value: unknown,
+  sourceMeaning: string,
+): MeaningSense[] {
+  const result: MeaningSense[] = [];
+  const add = (
+    meaning: string,
+    note = "",
+    primary = false,
+    exampleEn = "",
+    exampleZh = "",
+  ) => {
+    const cleanedMeaning = meaning.trim();
+    if (!cleanedMeaning) return;
+    const duplicate = result.some(
+      (item) =>
+        normalizeChinese(item.meaning) ===
+        normalizeChinese(cleanedMeaning),
+    );
+    if (!duplicate) {
+      result.push({
+        meaning: cleanedMeaning,
+        note: note.trim() || undefined,
+        primary,
+        exampleEn: exampleEn.trim() || undefined,
+        exampleZh: exampleZh.trim() || undefined,
+      });
+    }
+  };
+
+  const rawItems = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[；;]/)
+      : [];
+  for (const item of rawItems) {
+    if (isRecord(item)) {
+      add(
+        stringValue(item.meaning) || stringValue(item.label),
+        stringValue(item.note),
+        Boolean(item.primary),
+        stringValue(item.exampleEn),
+        stringValue(item.exampleZh),
+      );
+    } else if (typeof item === "string") {
+      add(item);
+    }
+  }
+  if (result.length === 0) {
+    add(sourceMeaning, "", true);
+  } else if (!result.some((item) => item.primary)) {
+    result[0] = { ...result[0], primary: true };
+  }
+  return result;
+}
+
+function normalizePrimaryExampleIndexes(
+  value: unknown,
+  variantCount: number,
+): number[] {
+  const indexes = Array.isArray(value)
+    ? value
+        .map(Number)
+        .filter(
+          (index) =>
+            Number.isInteger(index) && index >= 0 && index < variantCount,
+        )
+    : [];
+  return indexes.length > 0
+    ? [...new Set(indexes)]
+    : Array.from({ length: variantCount }, (_, index) => index);
+}
+
+function normalizeExampleVariants(input: {
+  raw: unknown;
+  exampleEn: string;
+  exampleZh: string;
+  quizExampleEn: string;
+  quizExampleZh: string;
+}): PhraseExample[] {
+  const variants: PhraseExample[] = [];
+  const add = (exampleEn: string, exampleZh: string) => {
+    const en = cleanSentence(exampleEn);
+    const zh = cleanSentence(exampleZh);
+    if (!en || !zh) return;
+    const duplicate = variants.some(
+      (item) => item.exampleEn.toLowerCase() === en.toLowerCase(),
+    );
+    if (!duplicate) variants.push({ exampleEn: en, exampleZh: zh });
+  };
+
+  add(input.exampleEn, input.exampleZh);
+  add(input.quizExampleEn, input.quizExampleZh);
+  if (Array.isArray(input.raw)) {
+    for (const item of input.raw) {
+      if (!isRecord(item)) continue;
+      add(
+        stringValue(item.exampleEn) || stringValue(item.example),
+        stringValue(item.exampleZh) ||
+          stringValue(item.example_translation),
+      );
+    }
+  }
+  return variants;
+}
+
 function normalizeTags(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.map(String).map((tag) => tag.trim()).filter(Boolean);
@@ -298,9 +451,27 @@ function normalizeExerciseModes(
 function getContentStatus(
   exampleEn: string,
   exampleZh: string,
+  variants: readonly PhraseExample[],
+  senses: readonly MeaningSense[],
+  primaryExampleIndexes: readonly number[],
 ): ContentStatus {
   if (!exampleEn) return "missingExample";
   if (!exampleZh) return "missingTranslation";
+  if (
+    variants.some(
+      (item) => !item.exampleEn || !item.exampleZh,
+    )
+  ) {
+    return "missingTranslation";
+  }
+  if (variants.length < 4) return "needsReview";
+  if (
+    senses.length > 1 &&
+    senses.some((sense) => !sense.exampleEn || !sense.exampleZh)
+  ) {
+    return "needsReview";
+  }
+  if (primaryExampleIndexes.length === 0) return "needsReview";
   return "complete";
 }
 

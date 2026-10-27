@@ -13,23 +13,31 @@ import {
   selectNewPhrases,
 } from "@/lib/domain/learning-flow";
 import {
+  meaningRecallRequirement,
+  previewRecognitionRequirement,
+} from "@/lib/domain/learning-policy";
+import {
   calibrateGrade,
   provisionalGradeFromDay0,
 } from "@/lib/domain/grading";
 import {
   CALIBRATION_QUESTION_ORDER,
-  chooseReviewTypes,
+  MAX_REVIEW_CORRECTION_ROUNDS,
+  buildReviewAttemptTypes,
+  canUseContextChoice,
+  chooseSenseIndex,
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
 import {
   createInitialReviewState,
+  compareReviewPriority,
   qualityFromResults,
-  reviewUrgency,
   updateReviewSchedule,
 } from "@/lib/domain/scheduler";
 import { TRACKS } from "@/lib/domain/constants";
 import {
   normalizeEnglishAnswer,
+  seededShuffle,
   shuffle,
   unique,
 } from "@/lib/domain/text";
@@ -44,6 +52,8 @@ import type {
   Grade,
   LearningSession,
   Phrase,
+  QuestionType,
+  Rating,
   ReviewAttempt,
   ReviewLog,
   ReviewPlan,
@@ -210,7 +220,7 @@ export async function getTodayData(
       .filter(
         (item) => item.trackId === trackId && isDue(item.nextReviewOn, today),
       )
-      .sort((left, right) => reviewUrgency(right, today) - reviewUrgency(left, today))
+      .sort((left, right) => compareReviewPriority(left, right, today))
       .map((item) => phraseById.get(item.phraseId))
       .filter((item): item is Phrase => Boolean(item));
 
@@ -383,6 +393,88 @@ export async function setDay0Rating(
   });
 }
 
+export async function recordLearningPreviewRating(
+  sessionId: string,
+  phraseId: string,
+  rating: Rating,
+  exampleVariant = 0,
+): Promise<LearningSession> {
+  return db.transaction(
+    "rw",
+    [db.learningSessions, db.cardProgress],
+    async () => {
+      const session = await db.learningSessions.get(sessionId);
+      const progress = await db.cardProgress.get(phraseId);
+      if (!session || !progress) throw new Error("Learning card not found");
+
+      const normalized = normalizeLearningSession(session);
+      const requiredCount = previewRecognitionRequirement(rating);
+      const recognizedCount =
+        normalized.previewedPhraseIds?.includes(phraseId)
+          ? progress.previewRecognizedCount ?? 0
+          : rating === "know"
+            ? 1
+            : 0;
+      normalized.previewedPhraseIds = unique([
+        ...(normalized.previewedPhraseIds ?? []),
+        phraseId,
+      ]);
+      normalized.updatedAt = Date.now();
+      await db.cardProgress.put({
+        ...markExampleUsage(progress, exampleVariant),
+        day0Rating: rating,
+        previewRequiredCount: requiredCount,
+        previewRecognizedCount: recognizedCount,
+        lastPreviewedAt: normalized.updatedAt,
+        updatedAt: normalized.updatedAt,
+      });
+      await db.learningSessions.put(normalized);
+      return normalized;
+    },
+  );
+}
+
+export async function recordLearningPreviewRecognition(
+  sessionId: string,
+  phraseId: string,
+  recognized: boolean,
+): Promise<LearningSession> {
+  return db.transaction(
+    "rw",
+    [db.learningSessions, db.cardProgress],
+    async () => {
+      const session = await db.learningSessions.get(sessionId);
+      const progress = await db.cardProgress.get(phraseId);
+      if (!session || !progress) throw new Error("Learning card not found");
+      if (!progress.day0Rating) {
+        throw new Error("Preview rating not found");
+      }
+
+      const normalized = normalizeLearningSession(session);
+      const requiredCount = previewRecognitionRequirement(
+        progress.day0Rating,
+      );
+      const recognizedCount = recognized
+        ? Math.min(
+            requiredCount,
+            (progress.previewRecognizedCount ?? 0) + 1,
+          )
+        : 0;
+      const updatedAt = Date.now();
+      await db.cardProgress.put({
+        ...progress,
+        previewRequiredCount: requiredCount,
+        previewRecognizedCount: recognizedCount,
+        lastPreviewedAt: updatedAt,
+        updatedAt,
+      });
+      normalized.updatedAt = updatedAt;
+      await db.learningSessions.put(normalized);
+      return normalized;
+    },
+  );
+}
+
 export interface LearningGateQueueItem {
   phrase: Phrase;
   progress: CardProgress;
@@ -419,18 +511,27 @@ export async function getLearningGateQueue(
       .map((item) => [item.phraseId, item]),
   );
 
-  return pendingIds
+  const items = pendingIds
     .map((id) => {
       const phrase = phraseById.get(id);
       const progress = progressById.get(id);
       return phrase && progress ? { phrase, progress, gate } : null;
     })
-    .filter((item): item is LearningGateQueueItem => Boolean(item))
-    .sort((left, right) => {
-      const leftAt = left.progress.day0Gates?.[gate]?.lastAttemptAt ?? 0;
-      const rightAt = right.progress.day0Gates?.[gate]?.lastAttemptAt ?? 0;
-      return leftAt - rightAt;
-    });
+    .filter((item): item is LearningGateQueueItem => Boolean(item));
+  const attemptCounts = unique(
+    items.map(
+      (item) => item.progress.day0Gates?.[gate]?.attempts ?? 0,
+    ),
+  ).sort((left, right) => left - right);
+  return attemptCounts.flatMap((attempts) =>
+    seededShuffle(
+      items.filter(
+        (item) =>
+          (item.progress.day0Gates?.[gate]?.attempts ?? 0) === attempts,
+      ),
+      `${session.id}:${gate}:${attempts}`,
+    ),
+  );
 }
 
 export async function recordLearningGateAnswer(
@@ -443,26 +544,66 @@ export async function recordLearningGateAnswer(
   answer: string,
   expectedAnswer: string,
   responseTimeMs: number,
-): Promise<{ session: LearningSession; completed: boolean }> {
+  exampleVariant?: number,
+  senseIndex?: number,
+): Promise<{
+  session: LearningSession;
+  completed: boolean;
+  passed: boolean;
+  correctStreak: number;
+  requiredCorrect: number;
+}> {
   return db.transaction(
     "rw",
-    [db.learningSessions, db.cardProgress, db.reviewLogs],
+    [db.learningSessions, db.cardProgress, db.reviewLogs, db.phrases],
     async () => {
       const session = await db.learningSessions.get(sessionId);
       const progress = await db.cardProgress.get(phraseId);
-      if (!session || !progress) throw new Error("Learning card not found");
+      const phrase = await db.phrases.get(phraseId);
+      if (!session || !progress || !phrase) {
+        throw new Error("Learning card not found");
+      }
       const normalized = normalizeLearningSession(session);
       const roundKey = String(
         normalized.currentRound,
       ) as "1" | "2" | "3" | "4";
+      if (gate !== LEARNING_GATES[normalized.currentRound - 1]) {
+        throw new Error("Learning gate does not match current round");
+      }
       if (normalized.roundPassedIds[roundKey].includes(phraseId)) {
-        return { session: normalized, completed: normalized.status === "completed" };
+        return {
+          session: normalized,
+          completed: normalized.status === "completed",
+          passed: true,
+          correctStreak: 1,
+          requiredCorrect: 1,
+        };
       }
       const current = progress.day0Gates?.[gate];
+      const senseGate =
+        gate === "exit" &&
+        questionType === "senseChoice" &&
+        senseIndex !== undefined;
+      const sensePassedIndexes = senseGate && correct
+        ? unique([...(progress.sensePassedIndexes ?? []), senseIndex])
+        : progress.sensePassedIndexes ?? [];
+      const requiredCorrect = senseGate
+        ? Math.max(0, (phrase.senses?.length ?? 1) - 1)
+        : questionType === "spelling"
+          ? 3
+          : gate === "meaning" && questionType === "meaning"
+            ? meaningRecallRequirement(progress.day0Rating)
+            : 1;
+      const correctStreak = senseGate
+        ? sensePassedIndexes.length
+        : correct
+          ? (current?.correctStreak ?? 0) + 1
+          : 0;
       const nextResult: Day0GateResult = current
         ? {
             ...current,
             finalCorrect: current.finalCorrect || correct,
+            correctStreak,
             attempts: current.attempts + 1,
             lastAttemptAt: Date.now(),
           }
@@ -470,17 +611,19 @@ export async function recordLearningGateAnswer(
             questionType,
             firstCorrect: correct,
             finalCorrect: correct,
+            correctStreak,
             attempts: 1,
             lastAttemptAt: Date.now(),
           };
-      const nextProgress: CardProgress = {
+      const nextProgress = markSenseUsage(markExampleUsage({
         ...progress,
         day0Gates: {
           ...progress.day0Gates,
           [gate]: nextResult,
         },
+        sensePassedIndexes,
         updatedAt: Date.now(),
-      };
+      }, exampleVariant), senseIndex);
       await db.cardProgress.put(nextProgress);
       await db.reviewLogs.add({
         phraseId,
@@ -496,9 +639,12 @@ export async function recordLearningGateAnswer(
         expectedAnswer,
         quality: correct ? 4 : 0,
         responseTimeMs,
+        exampleVariant,
+        senseIndex,
       });
 
-      if (correct) {
+      const passed = correct && correctStreak >= requiredCorrect;
+      if (passed) {
         normalized.roundPassedIds[roundKey] = unique([
           ...normalized.roundPassedIds[roundKey],
           phraseId,
@@ -516,13 +662,25 @@ export async function recordLearningGateAnswer(
             | 4;
         } else {
           await finalizeDay0Session(normalized);
-          return { session: normalized, completed: true };
+          return {
+            session: normalized,
+            completed: true,
+            passed,
+            correctStreak,
+            requiredCorrect,
+          };
         }
       }
 
       normalized.updatedAt = Date.now();
       await db.learningSessions.put(normalized);
-      return { session: normalized, completed: false };
+      return {
+        session: normalized,
+        completed: false,
+        passed,
+        correctStreak,
+        requiredCorrect,
+      };
     },
   );
 }
@@ -596,23 +754,31 @@ export async function ensureReviewPlan(
   const id = `${today}:${trackId}`;
   return db.transaction(
     "rw",
-    [db.reviewPlans, db.reviewStates, db.phrases, db.calibrationPlans],
+    [
+      db.reviewPlans,
+      db.reviewStates,
+      db.phrases,
+      db.calibrationPlans,
+      db.cardProgress,
+    ],
     async () => {
       const existing = await db.reviewPlans.get(id);
       if (existing) return existing;
 
-      const [states, phrases, plans, calibrationPlans] = await Promise.all([
-        db.reviewStates.where("trackId").equals(trackId).toArray(),
+      const [allStates, phrases, plans, calibrationPlans, progresses] =
+        await Promise.all([
+        db.reviewStates.toArray(),
         db.phrases.where("trackId").equals(trackId).toArray(),
         db.reviewPlans.where("date").equals(today).toArray(),
         db.calibrationPlans.where("date").equals(today).toArray(),
+        db.cardProgress.toArray(),
       ]);
+      const states = allStates.filter((item) => item.trackId === trackId);
       const phraseById = phraseMap(phrases);
       const scheduled = states
         .filter((item) => isDue(item.nextReviewOn, today))
         .sort(
-          (left, right) =>
-            reviewUrgency(right, today) - reviewUrgency(left, today),
+          (left, right) => compareReviewPriority(left, right, today),
         );
 
       const trackLimit =
@@ -626,11 +792,46 @@ export async function ensureReviewPlan(
         (sum, plan) => sum + plan.phraseIds.length,
         0,
       );
+      const otherTrack = trackId === "fixed" ? "verb-pattern" : "fixed";
+      const otherTrackLimit =
+        otherTrack === "fixed"
+          ? settings.fixedReviewLimit
+          : settings.verbReviewLimit;
+      const otherDueWorkload =
+        allStates.filter(
+          (item) =>
+            item.trackId === otherTrack &&
+            isDue(item.nextReviewOn, today) &&
+            !plans.some(
+              (plan) =>
+                plan.trackId === otherTrack &&
+                plan.phraseIds.includes(item.phraseId),
+            ),
+        ).length +
+        progresses.filter(
+          (item) =>
+            item.trackId === otherTrack &&
+            item.state === "incubating" &&
+            item.calibrationDueOn &&
+            isDue(item.calibrationDueOn, today) &&
+            !calibrationPlans.some(
+              (plan) =>
+                plan.trackId === otherTrack &&
+                plan.phraseIds.includes(item.phraseId),
+            ),
+        ).length;
+      const reserveForOtherTrack = Math.min(
+        otherDueWorkload,
+        otherTrackLimit,
+      );
       const totalRemaining = Math.max(
         0,
         settings.totalReviewLimit - otherTrackCount - calibrationCount,
       );
-      const limit = Math.min(trackLimit, totalRemaining);
+      const limit = Math.min(
+        totalRemaining,
+        Math.max(trackLimit, totalRemaining - reserveForOtherTrack),
+      );
       const reviewIds = scheduled
         .map((item) => item.phraseId)
         .slice(0, limit);
@@ -673,7 +874,8 @@ export async function ensureReviewPlan(
 export interface CalibrationQueueItem {
   phrase: Phrase;
   progress: CardProgress;
-  questionType: (typeof CALIBRATION_QUESTION_ORDER)[number];
+  questionType: QuestionType;
+  senseIndex?: number;
 }
 
 export async function ensureCalibrationPlan(
@@ -790,18 +992,39 @@ export async function getCalibrationQueue(
     if (!phrase || !progress) continue;
     const preferred = CALIBRATION_QUESTION_ORDER[plan.currentRound - 1];
     const questionType =
-      preferred === "contextChoice" && !phrase.exampleEn
-        ? "phraseChoice"
-        : preferred;
-    items.push({ phrase, progress, questionType });
+      preferred === "contextChoice" &&
+      (phrase.senses?.length ?? 0) > 1
+        ? "senseChoice"
+        : preferred === "contextChoice" &&
+            !canUseContextChoice(phrase)
+          ? "phraseChoice"
+          : preferred;
+    items.push({
+      phrase,
+      progress,
+      questionType,
+      senseIndex:
+        questionType === "senseChoice"
+          ? chooseSenseIndex(phrase, progress)
+          : undefined,
+    });
   }
-  return items.sort((left, right) => {
-    const leftResult = plan.results[left.phrase.id]?.[roundKey];
-    const rightResult = plan.results[right.phrase.id]?.[roundKey];
-    return (
-      (leftResult?.lastAttemptAt ?? 0) - (rightResult?.lastAttemptAt ?? 0)
-    );
-  });
+  const attemptCounts = unique(
+    items.map(
+      (item) =>
+        plan.results[item.phrase.id]?.[roundKey]?.attempts ?? 0,
+    ),
+  ).sort((left, right) => left - right);
+  return attemptCounts.flatMap((attempts) =>
+    seededShuffle(
+      items.filter(
+        (item) =>
+          (plan.results[item.phrase.id]?.[roundKey]?.attempts ?? 0) ===
+          attempts,
+      ),
+      `${plan.id}:${roundKey}:${attempts}`,
+    ),
+  );
 }
 
 export async function recordCalibrationAnswer(
@@ -813,6 +1036,8 @@ export async function recordCalibrationAnswer(
   answer: string,
   expectedAnswer: string,
   responseTimeMs: number,
+  exampleVariant?: number,
+  senseIndex?: number,
 ): Promise<{ plan: CalibrationPlan; failed: boolean }> {
   return db.transaction(
     "rw",
@@ -836,16 +1061,28 @@ export async function recordCalibrationAnswer(
       const phraseResults = plan.results[phraseId] ?? {};
       const current = phraseResults[roundKey];
       const attemptAt = Date.now();
+      const cardProgress = await db.cardProgress.get(phraseId);
+      const requiredCorrect =
+        questionType === "spelling"
+          ? 3
+          : questionType === "meaning"
+            ? meaningRecallRequirement(cardProgress?.day0Rating)
+            : 1;
+      const correctStreak = correct
+        ? (current?.correctStreak ?? 0) + 1
+        : 0;
       const nextResult = current
         ? {
             ...current,
             finalCorrect: current.finalCorrect || correct,
+            correctStreak,
             attempts: current.attempts + 1,
             lastAttemptAt: attemptAt,
           }
         : {
             firstCorrect: correct,
             finalCorrect: correct,
+            correctStreak,
             attempts: 1,
             lastAttemptAt: attemptAt,
           };
@@ -866,10 +1103,24 @@ export async function recordCalibrationAnswer(
         expectedAnswer,
         quality: correct ? 4 : 0,
         responseTimeMs,
+        exampleVariant,
+        senseIndex,
       });
 
+      if (exampleVariant !== undefined || senseIndex !== undefined) {
+        const progress = await db.cardProgress.get(phraseId);
+        if (progress) {
+          await db.cardProgress.put(
+            markSenseUsage(
+              markExampleUsage(progress, exampleVariant),
+              senseIndex,
+            ),
+          );
+        }
+      }
+
       let failed = false;
-      if (correct) {
+      if (correct && correctStreak >= requiredCorrect) {
         plan.roundPassedIds[roundKey] = unique([
           ...plan.roundPassedIds[roundKey],
           phraseId,
@@ -1042,7 +1293,17 @@ export async function getReviewQueue(
       attempt: plan.attempts[id],
     });
   }
-  return items;
+  const depths = unique(
+    items.map((item) => item.attempt?.answers.length ?? 0),
+  ).sort((left, right) => left - right);
+  return depths.flatMap((depth) =>
+    seededShuffle(
+      items.filter(
+        (item) => (item.attempt?.answers.length ?? 0) === depth,
+      ),
+      `${plan.id}:review:${depth}`,
+    ),
+  );
 }
 
 export async function startReviewAttempt(
@@ -1060,11 +1321,15 @@ export async function startReviewAttempt(
     db.cardProgress.get(phraseId),
   ]);
   if (!phrase) throw new Error("Phrase not found");
-  const types = chooseReviewTypes(phrase, progress, random);
+  const types = buildReviewAttemptTypes(phrase, progress, random);
   const attempt: ReviewAttempt = {
     phraseId,
     types,
     answers: [],
+    initialTypesLength: types.length,
+    passStartIndex: 0,
+    reviewRound: 1,
+    spellingCorrectStreak: 0,
     startedAt: Date.now(),
   };
   plan.attempts[phraseId] = attempt;
@@ -1109,6 +1374,30 @@ export async function getDistractors(
     .slice(0, count);
 }
 
+export async function getMeaningDistractors(
+  phrase: Phrase,
+  count = 3,
+): Promise<string[]> {
+  const sameTrack = await db.phrases
+    .where("trackId")
+    .equals(phrase.trackId)
+    .toArray();
+  const excluded = new Set([
+    phrase.meaning,
+    ...(phrase.senses ?? []).map((sense) => sense.meaning),
+  ]);
+  return unique(
+    shuffle(
+      sameTrack
+        .flatMap((item) => [
+          item.meaning,
+          ...(item.senses ?? []).map((sense) => sense.meaning),
+        ])
+        .filter((meaning) => meaning && !excluded.has(meaning)),
+    ),
+  ).slice(0, count);
+}
+
 export async function recordReviewAnswer(
   planId: string,
   phraseId: string,
@@ -1118,10 +1407,18 @@ export async function recordReviewAnswer(
   answer: string,
   expectedAnswer: string,
   responseTimeMs: number,
+  exampleVariant?: number,
+  senseIndex?: number,
 ): Promise<{ plan: ReviewPlan; completed: boolean }> {
   return db.transaction(
     "rw",
-    [db.reviewPlans, db.reviewLogs, db.cardProgress, db.reviewStates],
+    [
+      db.reviewPlans,
+      db.reviewLogs,
+      db.cardProgress,
+      db.reviewStates,
+      db.phrases,
+    ],
     async () => {
       const plan = await db.reviewPlans.get(planId);
       if (!plan) throw new Error("Review plan not found");
@@ -1129,9 +1426,15 @@ export async function recordReviewAnswer(
       if (!attempt || attempt.finalizedAt) {
         return { plan, completed: Boolean(attempt?.finalizedAt) };
       }
-      if (attempt.answers.some((item) => item.questionType === questionType)) {
-        return { plan, completed: false };
+      if (attempt.types[attempt.answers.length] !== questionType) {
+        throw new Error("Review question does not match current plan");
       }
+      const spellingCorrectStreak =
+        questionType === "spelling"
+          ? correct
+            ? (attempt.spellingCorrectStreak ?? 0) + 1
+            : 0
+          : (attempt.spellingCorrectStreak ?? 0);
 
       attempt.answers.push({
         questionType,
@@ -1141,6 +1444,8 @@ export async function recordReviewAnswer(
         expectedAnswer,
         responseTimeMs,
       });
+      attempt.spellingCorrectStreak = spellingCorrectStreak;
+      attempt.lastAnsweredAt = Date.now();
 
       const log: ReviewLog = {
         phraseId,
@@ -1156,11 +1461,65 @@ export async function recordReviewAnswer(
         expectedAnswer,
         quality: correct ? 4 : 0,
         responseTimeMs,
+        exampleVariant,
+        senseIndex,
       };
       await db.reviewLogs.add(log);
+      if (exampleVariant !== undefined) {
+        const progress = await db.cardProgress.get(phraseId);
+        if (progress) {
+          await db.cardProgress.put(markExampleUsage(progress, exampleVariant));
+        }
+      }
+      if (senseIndex !== undefined) {
+        const latest = await db.cardProgress.get(phraseId);
+        if (latest) {
+          await db.cardProgress.put(markSenseUsage(latest, senseIndex));
+        }
+      }
+
+      if (questionType === "spelling" && spellingCorrectStreak < 3) {
+        const remainingSpelling = attempt.types
+          .slice(attempt.answers.length)
+          .filter((item) => item === "spelling").length;
+        const missingSpelling = Math.max(
+          0,
+          3 - spellingCorrectStreak - remainingSpelling,
+        );
+        if (missingSpelling > 0) {
+          attempt.types.splice(
+            attempt.answers.length,
+            0,
+            ...Array.from({ length: missingSpelling }, () => "spelling" as const),
+          );
+        }
+      }
 
       if (attempt.answers.length >= attempt.types.length) {
-        await finalizeReviewAttempt(plan, attempt);
+        const passStart = attempt.passStartIndex ?? 0;
+        const passPassed = attempt.answers
+          .slice(passStart)
+          .every((item) => item.correct);
+        if (passPassed) {
+          await finalizeReviewAttempt(plan, attempt);
+        } else if (
+          (attempt.reviewRound ?? 1) >= MAX_REVIEW_CORRECTION_ROUNDS
+        ) {
+          await finalizeReviewAttempt(plan, attempt, true);
+        } else {
+          const [phrase, progress] = await Promise.all([
+            db.phrases.get(phraseId),
+            db.cardProgress.get(phraseId),
+          ]);
+          if (phrase) {
+            attempt.types.push(
+              ...buildReviewAttemptTypes(phrase, progress),
+            );
+            attempt.passStartIndex = attempt.answers.length;
+            attempt.reviewRound = (attempt.reviewRound ?? 1) + 1;
+          }
+          await db.reviewPlans.put(plan);
+        }
       } else {
         await db.reviewPlans.put(plan);
       }
@@ -1176,14 +1535,20 @@ export async function recordReviewAnswer(
 async function finalizeReviewAttempt(
   plan: ReviewPlan,
   attempt: ReviewAttempt,
+  forceFailure = false,
 ): Promise<void> {
   const now = Date.now();
-  const results = attempt.answers.map((item) => item.correct);
+  const firstPassAnswers = attempt.answers.slice(
+    0,
+    attempt.initialTypesLength ?? attempt.answers.length,
+  );
+  const gradedAttempt = { ...attempt, answers: firstPassAnswers };
+  const results = firstPassAnswers.map((item) => item.correct);
 
   if (plan.calibrationIds.includes(attempt.phraseId)) {
     const progress = await db.cardProgress.get(attempt.phraseId);
     if (progress?.day0) {
-      const resultsForGrade: CalibrationResult[] = attempt.answers.map(
+      const resultsForGrade: CalibrationResult[] = firstPassAnswers.map(
         (item) => ({
           questionType: item.questionType,
           skill: item.skill,
@@ -1200,7 +1565,7 @@ async function finalizeReviewAttempt(
           calibrationDueOn: addDays(plan.date, 1),
           graduatedOn: undefined,
           updatedAt: now,
-          skills: updateSkills(progress, attempt),
+          skills: updateSkills(progress, gradedAttempt),
         });
       } else {
       const reviewState = createInitialReviewState(
@@ -1217,7 +1582,7 @@ async function finalizeReviewAttempt(
         confirmedGrade: grade,
         graduatedOn: plan.date,
         updatedAt: now,
-        skills: updateSkills(progress, attempt),
+        skills: updateSkills(progress, gradedAttempt),
       });
       }
     }
@@ -1225,7 +1590,7 @@ async function finalizeReviewAttempt(
     const state = await db.reviewStates.get(attempt.phraseId);
     const progress = await db.cardProgress.get(attempt.phraseId);
     if (state) {
-      const quality = qualityFromResults(results);
+      const quality = forceFailure ? 0 : qualityFromResults(results);
       await db.reviewStates.put(
         updateReviewSchedule(state, quality, plan.date, now),
       );
@@ -1233,9 +1598,12 @@ async function finalizeReviewAttempt(
     if (progress) {
       await db.cardProgress.put({
         ...progress,
-        state: results.some(Boolean) ? "scheduled" : "relearning",
+        state:
+          !forceFailure && results.some(Boolean)
+            ? "scheduled"
+            : "relearning",
         updatedAt: now,
-        skills: updateSkills(progress, attempt),
+        skills: updateSkills(progress, gradedAttempt),
       });
     }
   }
@@ -1361,6 +1729,9 @@ export async function searchPhrases(options: {
         !query ||
         item.phrase.toLowerCase().includes(query) ||
         item.meaning.includes(query) ||
+        (item.senses ?? []).some((sense) =>
+          sense.meaning.includes(query),
+        ) ||
         item.exampleEn.toLowerCase().includes(query),
     )
     .filter((item) => {
@@ -1457,6 +1828,7 @@ function normalizeLearningSession(
 ): LearningSession {
   return {
     ...session,
+    previewedPhraseIds: session.previewedPhraseIds ?? [],
     currentRound: session.currentRound ?? 1,
     roundPassedIds: session.roundPassedIds ?? {
       "1": [],
@@ -1466,3 +1838,34 @@ function normalizeLearningSession(
     },
   };
 }
+
+function markExampleUsage(
+  progress: CardProgress,
+  exampleVariant?: number,
+): CardProgress {
+  if (exampleVariant === undefined) return progress;
+  const counts = [...(progress.exampleUseCounts ?? [])];
+  while (counts.length <= exampleVariant) counts.push(0);
+  counts[exampleVariant] += 1;
+  return {
+    ...progress,
+    exampleUseCounts: counts,
+    lastExampleIndex: exampleVariant,
+  };
+}
+
+function markSenseUsage(
+  progress: CardProgress,
+  senseIndex?: number,
+): CardProgress {
+  if (senseIndex === undefined) return progress;
+  const counts = [...(progress.senseUseCounts ?? [])];
+  while (counts.length <= senseIndex) counts.push(0);
+  counts[senseIndex] += 1;
+  return {
+    ...progress,
+    senseUseCounts: counts,
+    lastSenseIndex: senseIndex,
+  };
+}
+

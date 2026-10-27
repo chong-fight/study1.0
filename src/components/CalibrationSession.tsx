@@ -7,6 +7,9 @@ import { TRACKS, TRACK_LIST } from "@/lib/domain/constants";
 import {
   buildQuestion,
   checkAnswer,
+  chooseExampleVariant,
+  chooseSenseIndex,
+  contextExample,
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
 import { shuffle } from "@/lib/domain/text";
@@ -19,6 +22,7 @@ import {
   getCalibrationPlan,
   getCalibrationQueue,
   getDistractors,
+  getMeaningDistractors,
   recordCalibrationAnswer,
 } from "@/lib/data/repositories";
 import { useLocalDay } from "@/lib/hooks/useLocalDay";
@@ -53,6 +57,9 @@ export default function CalibrationSession({
     exampleEn: string;
     exampleZh: string;
     synonyms: string[];
+    correctStreak: number;
+    requiredCorrect: number;
+    passed: boolean;
   } | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
@@ -79,10 +86,26 @@ export default function CalibrationSession({
       return;
     }
     const type: QuestionType = item.questionType;
-    const distractors = ["phraseChoice", "contextChoice", "cloze"].includes(type)
-      ? await getDistractors(item.phrase, 3)
-      : [];
-    const nextQuestion = buildQuestion(type, item.phrase, distractors);
+    const senseIndex =
+      type === "senseChoice"
+        ? (item.senseIndex ?? chooseSenseIndex(item.phrase, item.progress))
+        : undefined;
+    const distractors =
+      type === "senseChoice"
+        ? await getMeaningDistractors(item.phrase, 3)
+        : ["phraseChoice", "contextChoice", "cloze"].includes(type)
+          ? await getDistractors(item.phrase, 3)
+          : [];
+    const variantIndex = ["contextChoice", "cloze"].includes(type)
+      ? chooseExampleVariant(item.phrase, item.progress)
+      : undefined;
+    const nextQuestion = buildQuestion(
+      type,
+      item.phrase,
+      distractors,
+      variantIndex,
+      senseIndex,
+    );
     if (nextQuestion.options) {
       nextQuestion.options = shuffle(nextQuestion.options);
     }
@@ -119,18 +142,42 @@ export default function CalibrationSession({
         value,
         question.expected,
         Date.now() - startedAt.current,
+        question.exampleVariant,
+        question.senseIndex,
       );
       setPlan(result.plan);
+      const roundResult =
+        result.plan.results[currentPhraseId]?.[roundKey];
+      const requiredCorrect = question.type === "spelling" ? 3 : 1;
+      const correctStreak =
+        roundResult?.correctStreak ?? (correct ? 1 : 0);
+      const selectedSense =
+        item &&
+        question.type === "senseChoice" &&
+        question.senseIndex !== undefined
+          ? item.phrase.senses?.[question.senseIndex]
+          : undefined;
+      const feedbackExample = selectedSense
+        ? {
+            exampleEn: selectedSense.exampleEn ?? "",
+            exampleZh: selectedSense.exampleZh ?? "",
+          }
+        : item
+          ? contextExample(item.phrase, question.exampleVariant)
+          : { exampleEn: "", exampleZh: "" };
       setFeedback({
         correct,
         failed: result.failed,
         expected: item?.phrase.meaning ?? question.expected,
-        exampleEn: item?.phrase.exampleEn || "英文例句待补全。",
-        exampleZh: item?.phrase.exampleZh || "中文翻译待补全。",
+        exampleEn: feedbackExample.exampleEn || "英文例句待补全。",
+        exampleZh: feedbackExample.exampleZh || "中文翻译待补全。",
         synonyms:
           item?.phrase.synonyms.map(
             (entry) => `${entry.phrase}：${entry.usage}`,
           ) ?? [],
+        correctStreak,
+        requiredCorrect,
+        passed: correct && correctStreak >= requiredCorrect,
       });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "验证结果保存失败");
@@ -258,12 +305,15 @@ export default function CalibrationSession({
                       ? "看中文写出英文短语"
                       : question.type === "contextChoice"
                         ? "选择最符合语境的短语"
+                        : question.type === "senseChoice"
+                          ? "选择句中短语的意思"
                         : "选择正确短语"}
                 </p>
                 <h2
                   className={`answer-question${
                     question.type === "contextChoice" ||
-                    question.type === "cloze"
+                    question.type === "cloze" ||
+                    question.type === "senseChoice"
                       ? " context"
                       : ""
                   }`}
@@ -314,9 +364,29 @@ export default function CalibrationSession({
                     {feedback.failed
                       ? "本轮未通过，明天重新验证"
                       : feedback.correct
-                        ? "本轮通过"
+                        ? feedback.passed
+                          ? "本轮通过"
+                          : "继续巩固"
                         : "这次没有答对"}
                   </div>
+                  {(question.type === "spelling" ||
+                    (question.type === "meaning" &&
+                      feedback.requiredCorrect > 1) ||
+                    question.type === "senseChoice") ? (
+                    <p className="streak-note">
+                      {question.type === "spelling"
+                        ? "默写"
+                        : question.type === "senseChoice"
+                          ? "义项"
+                          : "释义"}
+                      {question.type === "senseChoice" ? "已完成" : "连续正确"}{" "}
+                      {feedback.correctStreak}/
+                      {feedback.requiredCorrect}
+                      {feedback.correctStreak < feedback.requiredCorrect
+                        ? "，继续下一张后再回来"
+                        : "，本轮通过"}
+                    </p>
+                  ) : null}
                   <div
                     className={`feedback-copy${feedback.correct ? "" : " wrong"}`}
                   >

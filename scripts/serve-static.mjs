@@ -5,6 +5,8 @@ import path from "node:path";
 const root = path.resolve(import.meta.dirname, "../out");
 const port = Number(process.env.PORT || 4175);
 const basePath = (process.env.NEXT_PUBLIC_BASE_PATH || "").replace(/\/$/, "");
+const localPreviewSeedEnabled =
+  process.env.ENABLE_LOCAL_PREVIEW_SEED === "1";
 const types = {
   ".css": "text/css; charset=utf-8",
   ".html": "text/html; charset=utf-8",
@@ -18,6 +20,26 @@ const types = {
 http
   .createServer((request, response) => {
     const pathname = decodeURIComponent((request.url || "/").split("?")[0]);
+    if (
+      localPreviewSeedEnabled &&
+      pathname === "/local-preview/fixed.json"
+    ) {
+      const seedPath = path.resolve(
+        import.meta.dirname,
+        "../local-data/短词记_固定搭配.enhanced.json",
+      );
+      if (!fs.existsSync(seedPath)) {
+        response.writeHead(404);
+        response.end("Not found");
+        return;
+      }
+      response.writeHead(200, {
+        "content-type": "application/json; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      fs.createReadStream(seedPath).pipe(response);
+      return;
+    }
     if (basePath && !pathname.startsWith(`${basePath}/`) && pathname !== basePath) {
       response.writeHead(404);
       response.end("Not found");

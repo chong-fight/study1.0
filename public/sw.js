@@ -1,5 +1,5 @@
 // Bump this value when a release must invalidate all cached pages.
-const CACHE_NAME = "phrase-memory-2-v2";
+const CACHE_NAME = "phrase-memory-2-v14";
 
 self.addEventListener("install", () => {
   self.skipWaiting();

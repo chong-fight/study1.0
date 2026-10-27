@@ -1,5 +1,6 @@
 import type { Phrase } from "@/lib/domain/types";
 import { TRACKS } from "@/lib/domain/constants";
+import MeaningSenses from "@/components/MeaningSenses";
 
 interface PhraseDetailProps {
   phrase: Phrase;
@@ -15,7 +16,11 @@ export default function PhraseDetail({
   return (
     <div>
       <h3 className="detail-phrase">{phrase.phrase}</h3>
-      <p className="detail-meaning">{phrase.meaning}</p>
+      <MeaningSenses
+        phrase={phrase}
+        primaryClassName="detail-meaning"
+        showExamples
+      />
       <div className="detail-meta">
         <div>
           <span>学习线</span>

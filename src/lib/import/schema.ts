@@ -47,6 +47,11 @@ export interface RawSynonym {
   example?: unknown;
   exampleEn?: unknown;
   exampleZh?: unknown;
+  quizExample?: unknown;
+  quizExampleEn?: unknown;
+  quizExampleZh?: unknown;
+  exampleVariants?: unknown;
+  examples?: unknown;
   example_translation?: unknown;
 }
 
@@ -54,6 +59,8 @@ export interface RawPhrase {
   id?: unknown;
   phrase?: unknown;
   meaning?: unknown;
+  senses?: unknown;
+  otherMeanings?: unknown;
   example?: unknown;
   exampleEn?: unknown;
   exampleZh?: unknown;

@@ -17,9 +17,16 @@ export default function ServiceWorker() {
       return;
     }
     const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-    navigator.serviceWorker.register(`${basePath}/sw.js`).catch(() => {
-      // The application remains usable online if PWA registration is unavailable.
+    const hadController = Boolean(navigator.serviceWorker.controller);
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (hadController) window.location.reload();
     });
+    navigator.serviceWorker
+      .register(`${basePath}/sw.js`, { updateViaCache: "none" })
+      .then((registration) => registration.update())
+      .catch(() => {
+        // The application remains usable online if PWA registration is unavailable.
+      });
   }, []);
 
   return null;

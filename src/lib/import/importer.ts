@@ -86,8 +86,13 @@ function stableFields(phrase: Phrase) {
   return {
     phrase: phrase.phrase,
     meaning: phrase.meaning,
+    senses: phrase.senses,
     exampleEn: phrase.exampleEn,
     exampleZh: phrase.exampleZh,
+    quizExampleEn: phrase.quizExampleEn,
+    quizExampleZh: phrase.quizExampleZh,
+    exampleVariants: phrase.exampleVariants,
+    primaryExampleIndexes: phrase.primaryExampleIndexes,
     category: phrase.category,
     entryType: phrase.entryType,
     tags: phrase.tags,

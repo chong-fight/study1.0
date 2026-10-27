@@ -13,6 +13,12 @@
     "test:watch": "vitest --configLoader runner",
     "audit:data": "node scripts/audit-local-data.mjs",
     "enrich:data": "node scripts/enrich-local-data.mjs",
+    "generate:quiz-examples": "node scripts/generate-quiz-examples.mjs",
+    "generate:example-variants": "node scripts/generate-example-variants.mjs",
+    "enrich:senses": "node scripts/enrich-word-senses.mjs",
+    "link:senses": "node scripts/link-senses-and-examples.mjs",
+    "complete:primary-examples": "node scripts/complete-primary-examples.mjs",
+    "verify:release": "npm run typecheck && npm run lint && npm run test && npm run build",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build"
   },
   "dependencies": {

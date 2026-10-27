@@ -27,14 +27,19 @@ export function selectNewPhrases(
 ): Phrase[] {
   if (limit <= 0) return [];
 
-  const sorted = [...phrases].sort((left, right) => {
-    if (left.priority !== right.priority) return left.priority - right.priority;
-    return left.createdAt - right.createdAt;
-  });
+  const priorityGroups = new Map<number, Phrase[]>();
+  for (const phrase of phrases) {
+    const group = priorityGroups.get(phrase.priority) ?? [];
+    group.push(phrase);
+    priorityGroups.set(phrase.priority, group);
+  }
+  const ordered = [...priorityGroups.entries()]
+    .sort(([left], [right]) => left - right)
+    .flatMap(([, group]) => shuffle(group, random));
   const selected: Phrase[] = [];
   const groups = new Set(usedConfusionGroups);
 
-  for (const phrase of shuffle(sorted, random)) {
+  for (const phrase of ordered) {
     if (selected.length >= limit) break;
     if (learnedIds.has(phrase.id)) continue;
     if (phrase.confusionGroup && groups.has(phrase.confusionGroup)) continue;
@@ -78,6 +83,7 @@ export function createLearningSession(
     date: today,
     trackId,
     phraseIds: phrases.map((phrase) => phrase.id),
+    previewedPhraseIds: [],
     stage: "day0",
     currentRound: 1,
     roundPassedIds: { "1": [], "2": [], "3": [], "4": [] },

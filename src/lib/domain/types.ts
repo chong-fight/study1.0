@@ -16,6 +16,7 @@ export type QuestionType =
   | "meaning"
   | "phraseChoice"
   | "contextChoice"
+  | "senseChoice"
   | "spelling"
   | "cloze";
 export type ReviewQuality = 0 | 3 | 4 | 5;
@@ -23,6 +24,19 @@ export type ReviewQuality = 0 | 3 | 4 | 5;
 export interface Synonym {
   phrase: string;
   usage: string;
+  exampleEn?: string;
+  exampleZh?: string;
+}
+
+export interface PhraseExample {
+  exampleEn: string;
+  exampleZh: string;
+}
+
+export interface MeaningSense {
+  meaning: string;
+  note?: string;
+  primary?: boolean;
   exampleEn?: string;
   exampleZh?: string;
 }
@@ -42,8 +56,13 @@ export interface Phrase {
   phrase: string;
   normalizedPhrase: string;
   meaning: string;
+  senses?: MeaningSense[];
   exampleEn: string;
   exampleZh: string;
+  quizExampleEn?: string;
+  quizExampleZh?: string;
+  exampleVariants?: PhraseExample[];
+  primaryExampleIndexes?: number[];
   entryType: string;
   category: string;
   tags: string[];
@@ -77,6 +96,7 @@ export interface Day0GateResult {
   questionType: QuestionType;
   firstCorrect: boolean;
   finalCorrect: boolean;
+  correctStreak?: number;
   attempts: number;
   lastAttemptAt: number;
 }
@@ -102,6 +122,14 @@ export interface CardProgress {
   day0?: Day0Signal;
   day0Rating?: Rating;
   day0Gates?: Partial<Record<Day0GateName, Day0GateResult>>;
+  previewRequiredCount?: number;
+  previewRecognizedCount?: number;
+  lastPreviewedAt?: number;
+  exampleUseCounts?: number[];
+  lastExampleIndex?: number;
+  senseUseCounts?: number[];
+  lastSenseIndex?: number;
+  sensePassedIndexes?: number[];
   provisionalGrade?: Grade;
   confirmedGrade?: Grade;
   skills: Record<Skill, SkillState>;
@@ -117,6 +145,7 @@ export interface LearningSession {
   date: string;
   trackId: TrackId;
   phraseIds: string[];
+  previewedPhraseIds?: string[];
   stage: "day0" | "completed";
   currentRound: 1 | 2 | 3 | 4;
   roundPassedIds: Record<"1" | "2" | "3" | "4", string[]>;
@@ -169,6 +198,11 @@ export interface ReviewAttempt {
     expectedAnswer: string;
     responseTimeMs: number;
   }[];
+  initialTypesLength?: number;
+  passStartIndex?: number;
+  reviewRound?: number;
+  spellingCorrectStreak?: number;
+  lastAnsweredAt?: number;
   startedAt: number;
   finalizedAt?: number;
 }
@@ -189,6 +223,7 @@ export interface CalibrationPlan {
         {
           firstCorrect: boolean;
           finalCorrect: boolean;
+          correctStreak?: number;
           attempts: number;
           lastAttemptAt: number;
         }
@@ -217,6 +252,8 @@ export interface ReviewLog {
   selectedOption?: string;
   quality: ReviewQuality;
   responseTimeMs: number;
+  exampleVariant?: number;
+  senseIndex?: number;
 }
 
 export interface ImportJob {

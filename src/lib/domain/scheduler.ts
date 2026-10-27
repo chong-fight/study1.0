@@ -115,7 +115,20 @@ export function reviewUrgency(
   state: ReviewState,
   today = localDateKey(),
 ): number {
-  const overdueDays = Math.max(
+  const overdueDays = reviewOverdueDays(state, today);
+  return (
+    overdueDays * 100 +
+    reviewRisk(state.grade) +
+    (state.deferralCount ?? 0) * 20 +
+    state.mistakeCount
+  );
+}
+
+export function reviewOverdueDays(
+  state: ReviewState,
+  today = localDateKey(),
+): number {
+  return Math.max(
     0,
     Math.round(
       (new Date(`${today}T12:00:00`).getTime() -
@@ -123,19 +136,34 @@ export function reviewUrgency(
         86_400_000,
     ),
   );
-  const risk: Record<Grade, number> = {
+}
+
+export function compareReviewPriority(
+  left: ReviewState,
+  right: ReviewState,
+  today = localDateKey(),
+): number {
+  const overdueDifference =
+    reviewOverdueDays(right, today) - reviewOverdueDays(left, today);
+  if (overdueDifference !== 0) return overdueDifference;
+  const deferralDifference =
+    (right.deferralCount ?? 0) - (left.deferralCount ?? 0);
+  if (deferralDifference !== 0) return deferralDifference;
+  const riskDifference = reviewRisk(right.grade) - reviewRisk(left.grade);
+  if (riskDifference !== 0) return riskDifference;
+  const mistakeDifference = right.mistakeCount - left.mistakeCount;
+  if (mistakeDifference !== 0) return mistakeDifference;
+  return left.phraseId.localeCompare(right.phraseId);
+}
+
+function reviewRisk(grade: Grade): number {
+  return {
     D: 40,
     C: 30,
     B: 20,
     A: 10,
     S: 0,
-  };
-  return (
-    overdueDays * 100 +
-    risk[state.grade] +
-    (state.deferralCount ?? 0) * 20 +
-    state.mistakeCount
-  );
+  }[grade];
 }
 
 export function qualityFromResults(results: readonly boolean[]): ReviewQuality {

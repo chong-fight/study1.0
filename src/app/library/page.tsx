@@ -160,7 +160,14 @@ export default function LibraryPage() {
                   >
                     <div>
                       <p className="phrase-en">{phrase.phrase}</p>
-                      <p className="phrase-zh">{phrase.meaning}</p>
+                      <p className="phrase-zh">
+                        {phrase.meaning}
+                        {(phrase.senses?.length ?? 1) > 1 ? (
+                          <span className="sense-count">
+                            +{(phrase.senses?.length ?? 1) - 1}
+                          </span>
+                        ) : null}
+                      </p>
                     </div>
                     {progress?.confirmedGrade ? (
                       <span

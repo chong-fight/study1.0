@@ -8,6 +8,9 @@ import { TRACKS, TRACK_LIST } from "@/lib/domain/constants";
 import {
   buildQuestion,
   checkAnswer,
+  chooseExampleVariant,
+  chooseSenseIndex,
+  contextExample,
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
 import { shuffle } from "@/lib/domain/text";
@@ -22,6 +25,7 @@ import {
   ensureReviewPlan,
   getCalibrationSummary,
   getDistractors,
+  getMeaningDistractors,
   getReviewQueue,
   recordReviewAnswer,
   startReviewAttempt,
@@ -37,6 +41,8 @@ interface FeedbackState {
   exampleEn: string;
   exampleZh: string;
   synonyms: string[];
+  correctStreak: number;
+  requiredCorrect: number;
 }
 
 export default function ReviewPage() {
@@ -131,12 +137,26 @@ export default function ReviewPage() {
       setCurrentPhraseId(item.phrase.id);
       return;
     }
-    const distractors = ["cloze", "contextChoice", "phraseChoice"].includes(
+    const senseIndex =
+      nextType === "senseChoice"
+        ? chooseSenseIndex(item.phrase, item.progress)
+        : undefined;
+    const distractors =
+      nextType === "senseChoice"
+        ? await getMeaningDistractors(item.phrase, 3)
+        : ["cloze", "contextChoice", "phraseChoice"].includes(nextType)
+          ? await getDistractors(item.phrase, 3)
+          : [];
+    const variantIndex = ["cloze", "contextChoice"].includes(nextType)
+      ? chooseExampleVariant(item.phrase, item.progress)
+      : undefined;
+    const nextQuestion = buildQuestion(
       nextType,
-    )
-      ? await getDistractors(item.phrase, 3)
-      : [];
-    const nextQuestion = buildQuestion(nextType, item.phrase, distractors);
+      item.phrase,
+      distractors,
+      variantIndex,
+      senseIndex,
+    );
     if (nextQuestion.options) {
       nextQuestion.options = shuffle(nextQuestion.options);
     }
@@ -183,17 +203,34 @@ export default function ReviewPage() {
       answer,
       question.expected,
       Date.now() - startTime.current,
+      question.exampleVariant,
+      question.senseIndex,
     );
     setPlan(result.plan);
+    const spellingCorrectStreak =
+      result.plan.attempts[currentPhraseId]?.spellingCorrectStreak ?? 0;
+    const selectedSense =
+      question.type === "senseChoice" &&
+      question.senseIndex !== undefined
+        ? item.phrase.senses?.[question.senseIndex]
+        : undefined;
+    const feedbackExample = selectedSense
+      ? {
+          exampleEn: selectedSense.exampleEn ?? "",
+          exampleZh: selectedSense.exampleZh ?? "",
+        }
+      : contextExample(item.phrase, question.exampleVariant);
     setFeedback({
       correct,
       expected: item.phrase.meaning,
       answer,
-      exampleEn: item.phrase.exampleEn || "英文例句待补全。",
-      exampleZh: item.phrase.exampleZh || "中文翻译待补全。",
+      exampleEn: feedbackExample.exampleEn || "英文例句待补全。",
+      exampleZh: feedbackExample.exampleZh || "中文翻译待补全。",
       synonyms: item.phrase.synonyms.map(
         (entry) => `${entry.phrase}：${entry.usage}`,
       ),
+      correctStreak: spellingCorrectStreak,
+      requiredCorrect: 3,
     });
     setAnswered(true);
     } catch (caught) {
@@ -372,7 +409,9 @@ export default function ReviewPage() {
                       ? "看中拼英"
                       : question.type === "phraseChoice"
                         ? "形式选择"
-                        : "语境选择"}
+                        : question.type === "senseChoice"
+                          ? "义项辨析"
+                          : "语境选择"}
                 </span>
                 <span className="card-index">
                   {doneCount + 1} / {total}
@@ -386,12 +425,15 @@ export default function ReviewPage() {
                       ? "写出英文短语"
                       : question.type === "phraseChoice"
                         ? "选择正确英文形式"
+                        : question.type === "senseChoice"
+                          ? "选择句中短语的意思"
                         : "选择最符合语境的短语"}
                 </p>
                 <h2
                   className={`answer-question${
                     question.type === "contextChoice" ||
-                    question.type === "cloze"
+                    question.type === "cloze" ||
+                    question.type === "senseChoice"
                       ? " context"
                       : ""
                   }`}
@@ -442,6 +484,15 @@ export default function ReviewPage() {
                     <i />
                     {feedback.correct ? "回答正确" : "这次没有答对"}
                   </div>
+                  {question.type === "spelling" ? (
+                    <p className="streak-note">
+                      默写连续正确 {feedback.correctStreak}/
+                      {feedback.requiredCorrect}
+                      {feedback.correctStreak < feedback.requiredCorrect
+                        ? "，稍后会再次出现"
+                        : "，已通过"}
+                    </p>
+                  ) : null}
                   <div
                     className={`feedback-copy${feedback.correct ? "" : " wrong"}`}
                   >

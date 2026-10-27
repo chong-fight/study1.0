@@ -3,13 +3,19 @@
 import Link from "next/link";
 import { ArrowLeft, ArrowRight, BookOpen } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import MeaningSenses from "@/components/MeaningSenses";
 import { TRACKS, TRACK_LIST } from "@/lib/domain/constants";
+import { isPreviewRecognized } from "@/lib/domain/learning-policy";
 import {
   buildQuestion,
+  canUseContextChoice,
   checkAnswer,
+  chooseExampleVariant,
+  chooseSenseIndex,
+  contextExample,
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
-import { shuffle } from "@/lib/domain/text";
+import { seededShuffle, shuffle } from "@/lib/domain/text";
 import type {
   LearningSession,
   QuestionType,
@@ -22,15 +28,18 @@ import {
   getLearningCards,
   getLearningGateQueue,
   getLearningSession,
+  getMeaningDistractors,
+  recordLearningPreviewRecognition,
+  recordLearningPreviewRating,
   recordLearningGateAnswer,
-  setDay0Rating,
   type LearningGateQueueItem,
 } from "@/lib/data/repositories";
 import { getSettings } from "@/lib/data/settings";
 import { useLocalDay } from "@/lib/hooks/useLocalDay";
 import { useQuestionScroll } from "@/lib/hooks/useQuestionScroll";
 
-type Step = "preview" | "answer" | "feedback" | "done";
+type Step = "overview" | "answer" | "feedback" | "done";
+type LearningCard = Awaited<ReturnType<typeof getLearningCards>>[number];
 
 const GATE_LABELS = [
   "含义回忆",
@@ -49,10 +58,10 @@ export default function LearnPage() {
   const today = useLocalDay();
   const [trackId, setTrackId] = useState<TrackId>("fixed");
   const [session, setSession] = useState<LearningSession | null>(null);
+  const [learningCards, setLearningCards] = useState<LearningCard[]>([]);
   const [queue, setQueue] = useState<LearningGateQueueItem[]>([]);
   const [question, setQuestion] = useState<ReviewQuestion | null>(null);
-  const [step, setStep] = useState<Step>("preview");
-  const [rating, setRating] = useState<Rating>("vague");
+  const [step, setStep] = useState<Step>("overview");
   const [answer, setAnswer] = useState("");
   const [selected, setSelected] = useState("");
   const [feedback, setFeedback] = useState<{
@@ -61,6 +70,8 @@ export default function LearnPage() {
     exampleEn: string;
     exampleZh: string;
     synonyms: string[];
+    correctStreak: number;
+    requiredCorrect: number;
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -71,6 +82,42 @@ export default function LearnPage() {
   useQuestionScroll(Boolean(question), Boolean(feedback));
 
   const current = queue[0];
+  const previewShuffleOrder = seededShuffle(
+    learningCards.map((item) => item.phrase.id),
+    `${session?.id ?? today}:preview`,
+  );
+  const previewShuffleRank = new Map(
+    previewShuffleOrder.map((id, index) => [id, index]),
+  );
+  const learningCardOrder = new Map(
+    learningCards.map((item, index) => [item.phrase.id, index]),
+  );
+  const previewQueue = learningCards
+    .filter((item) => !isPreviewRecognized(item.progress))
+    .sort((left, right) => {
+      const leftRated = Boolean(left.progress?.day0Rating);
+      const rightRated = Boolean(right.progress?.day0Rating);
+      if (leftRated !== rightRated) return leftRated ? 1 : -1;
+      if (!leftRated) {
+        return (
+          (learningCardOrder.get(left.phrase.id) ?? 0) -
+          (learningCardOrder.get(right.phrase.id) ?? 0)
+        );
+      }
+      const countDifference =
+        (left.progress?.previewRecognizedCount ?? 0) -
+        (right.progress?.previewRecognizedCount ?? 0);
+      if (countDifference !== 0) return countDifference;
+      return (
+        (previewShuffleRank.get(left.phrase.id) ?? 0) -
+        (previewShuffleRank.get(right.phrase.id) ?? 0)
+      );
+    });
+  const previewItem = previewQueue[0];
+  const previewCompletedCount = learningCards.length - previewQueue.length;
+  const needsInitialPreviewRating = !previewItem?.progress?.day0Rating;
+  const inOverview = step === "overview" && Boolean(previewItem);
+  const activePhrase = inOverview ? previewItem?.phrase : current?.phrase;
   const total = session?.phraseIds.length ?? 0;
   const currentRound = session?.currentRound ?? 1;
   const roundKey = String(currentRound) as "1" | "2" | "3" | "4";
@@ -81,19 +128,48 @@ export default function LearnPage() {
   async function buildGateQuestion(item: LearningGateQueueItem) {
     const gate = item.gate;
     const available: QuestionType[] = ["meaning", "phraseChoice", "spelling"];
-    if (item.phrase.exampleEn) available.push("contextChoice");
+    if (canUseContextChoice(item.phrase)) available.push("contextChoice");
     let type: QuestionType;
+    let senseIndex: number | undefined;
     if (gate === "meaning") type = "meaning";
     else if (gate === "production") type = "spelling";
     else if (gate === "application") {
-      type = item.phrase.exampleEn ? "contextChoice" : "phraseChoice";
+      type = canUseContextChoice(item.phrase)
+        ? "contextChoice"
+        : "phraseChoice";
+    } else if ((item.phrase.senses ?? []).length > 1) {
+      type = "senseChoice";
+      const pendingSenseIndexes = (item.phrase.senses ?? [])
+        .map((_, index) => index)
+        .filter(
+          (index) =>
+            index > 0 &&
+            !(item.progress.sensePassedIndexes ?? []).includes(index),
+        );
+      senseIndex = chooseSenseIndex(
+        item.phrase,
+        item.progress,
+        pendingSenseIndexes,
+      );
     } else {
       type = shuffle(available)[0];
     }
-    const distractors = ["phraseChoice", "contextChoice", "cloze"].includes(type)
-      ? await getDistractors(item.phrase, 3)
-      : [];
-    const nextQuestion = buildQuestion(type, item.phrase, distractors);
+    const distractors =
+      type === "senseChoice"
+        ? await getMeaningDistractors(item.phrase, 3)
+        : ["phraseChoice", "contextChoice", "cloze"].includes(type)
+          ? await getDistractors(item.phrase, 3)
+          : [];
+    const variantIndex = ["contextChoice", "cloze"].includes(type)
+      ? chooseExampleVariant(item.phrase, item.progress)
+      : undefined;
+    const nextQuestion = buildQuestion(
+      type,
+      item.phrase,
+      distractors,
+      variantIndex,
+      senseIndex,
+    );
     if (nextQuestion.options) {
       nextQuestion.options = shuffle(nextQuestion.options);
     }
@@ -108,14 +184,16 @@ export default function LearnPage() {
       setSession(currentSession ?? null);
       if (!currentSession || currentSession.status === "completed") {
         setQueue([]);
+        setLearningCards([]);
         setQuestion(null);
         setCompleted(currentSession?.status === "completed");
-        setStep(currentSession?.status === "completed" ? "done" : "preview");
+        setStep(currentSession?.status === "completed" ? "done" : "overview");
         setLoading(false);
         return;
       }
 
       const cards = await getLearningCards(currentSession);
+      setLearningCards(cards);
       const nextQueue = await getLearningGateQueue(currentSession);
       setQueue(
         nextQueue.filter((item) =>
@@ -123,16 +201,29 @@ export default function LearnPage() {
         ),
       );
       const first = nextQueue[0];
+      const currentRoundKey = String(
+        currentSession.currentRound,
+      ) as "1" | "2" | "3" | "4";
+      const roundProgress =
+        currentSession.roundPassedIds?.[currentRoundKey]?.length ?? 0;
+      const hasGateProgress = cards.some(
+        (card) => Object.keys(card.progress?.day0Gates ?? {}).length > 0,
+      );
+      const previewIncomplete = cards.some(
+        (card) => !isPreviewRecognized(card.progress),
+      );
+      const needsOverview =
+        currentSession.currentRound === 1 &&
+        roundProgress === 0 &&
+        !hasGateProgress &&
+        previewIncomplete;
       if (!first) {
         setCompleted(true);
         setStep("done");
         setQuestion(null);
-      } else if (
-        currentSession.currentRound === 1 &&
-        !first.progress.day0Gates?.meaning
-      ) {
+      } else if (needsOverview) {
         setQuestion(null);
-        setStep("preview");
+        setStep("overview");
       } else {
         setQuestion(await buildGateQuestion(first));
         setStep("answer");
@@ -173,17 +264,43 @@ export default function LearnPage() {
     }
   }
 
-  async function beginMeaningRecall() {
-    if (!current) return;
+  async function beginMeaningRecall(nextRating: Rating) {
+    if (!session || !previewItem) return;
     setError("");
     try {
-      await setDay0Rating(current.phrase.id, rating);
-      setQuestion(await buildGateQuestion(current));
-      setStep("answer");
+      await recordLearningPreviewRating(
+        session.id,
+        previewItem.phrase.id,
+        nextRating,
+      );
+      await loadSession(trackId);
       setAnswer("");
-      startedAt.current = Date.now();
+      setSelected("");
+      setFeedback(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "学习状态保存失败");
+    }
+  }
+
+  async function continuePreview(recognized: boolean) {
+    if (!session || !previewItem) return;
+    setError("");
+    try {
+      await recordLearningPreviewRecognition(
+        session.id,
+        previewItem.phrase.id,
+        recognized,
+      );
+      await loadSession(trackId);
+      setAnswer("");
+      setSelected("");
+      setFeedback(null);
+    } catch (caught) {
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : "\u5b66\u4e60\u72b6\u6001\u4fdd\u5b58\u5931\u8d25",
+      );
     }
   }
 
@@ -205,17 +322,32 @@ export default function LearnPage() {
         value,
         question.expected,
         Date.now() - startedAt.current,
+        question.exampleVariant,
+        question.senseIndex,
       );
       setSession(result.session);
       setCompleted(result.completed);
+      const selectedSense =
+        question.type === "senseChoice" &&
+        question.senseIndex !== undefined
+          ? current.phrase.senses?.[question.senseIndex]
+          : undefined;
+      const feedbackExample = selectedSense
+        ? {
+            exampleEn: selectedSense.exampleEn ?? "",
+            exampleZh: selectedSense.exampleZh ?? "",
+          }
+        : contextExample(current.phrase, question.exampleVariant);
       setFeedback({
         correct,
         expected: question.expected,
-        exampleEn: current.phrase.exampleEn || "英文例句待补全。",
-        exampleZh: current.phrase.exampleZh || "中文翻译待补全。",
+        exampleEn: feedbackExample.exampleEn || "英文例句待补全。",
+        exampleZh: feedbackExample.exampleZh || "中文翻译待补全。",
         synonyms: current.phrase.synonyms.map(
           (item) => `${item.phrase}：${item.usage}`,
         ),
+        correctStreak: result.correctStreak,
+        requiredCorrect: result.requiredCorrect,
       });
       setStep("feedback");
     } catch (caught) {
@@ -246,7 +378,9 @@ export default function LearnPage() {
           <span className="meta">
             {TRACKS[trackId].label} ·{" "}
             {session
-              ? `${GATE_LABELS[currentRound - 1]} ${roundDone}/${total}`
+              ? inOverview
+                ? `\u9884\u89c8 ${Math.min(previewCompletedCount + 1, total)}/${total}`
+                : `${GATE_LABELS[currentRound - 1]} ${roundDone}/${total}`
               : "尚未开始"}
           </span>
         </div>
@@ -255,23 +389,42 @@ export default function LearnPage() {
             <div
               className="segmented-progress"
               aria-label={`学习关卡 ${currentRound}/4，本关完成 ${roundDone}/${total}`}
-              style={{ gridTemplateColumns: "repeat(4, 1fr)" }}
+              style={{
+                gridTemplateColumns: inOverview
+                  ? `repeat(${Math.max(total, 1)}, 1fr)`
+                  : "repeat(4, 1fr)",
+              }}
             >
-              {[1, 2, 3, 4].map((round) => (
-                <i
-                  key={round}
-                  className={
-                    round < currentRound
-                      ? "done"
-                      : round === currentRound
-                        ? "current"
-                        : ""
-                  }
-                />
-              ))}
+              {inOverview
+                ? Array.from({ length: Math.max(total, 1) }).map((_, index) => (
+                    <i
+                      key={index}
+                      className={
+                        index < previewCompletedCount
+                          ? "done"
+                          : index === previewCompletedCount
+                            ? "current"
+                            : ""
+                      }
+                    />
+                  ))
+                : [1, 2, 3, 4].map((round) => (
+                    <i
+                      key={round}
+                      className={
+                        round < currentRound
+                          ? "done"
+                          : round === currentRound
+                            ? "current"
+                            : ""
+                      }
+                    />
+                  ))}
             </div>
             <p className="quiet-note" style={{ marginTop: 9 }}>
-              第 0 天 · {GATE_LABELS[currentRound - 1]} · {roundDone}/{total}
+              {inOverview
+                ? `反复确认到认识目标（${previewCompletedCount}/${total} 已完成）`
+                : `第 0 天 · ${GATE_LABELS[currentRound - 1]} · ${roundDone}/${total}`}
             </p>
           </>
         ) : null}
@@ -332,22 +485,25 @@ export default function LearnPage() {
           <>
             <article className="focus-card">
               <div className="card-meta">
-                <span className="outline-tag">{current.phrase.entryType}</span>
+                <span className="outline-tag">{activePhrase?.entryType}</span>
                 <span className="card-index">
-                  {GATE_LABELS[currentRound - 1]} · {roundDone + 1}/{total}
+                  {inOverview
+                    ? `预览 ${previewCompletedCount + 1}/${total}`
+                    : `${GATE_LABELS[currentRound - 1]} · ${roundDone + 1}/${total}`}
                 </span>
               </div>
 
-              {step === "preview" ? (
+              {inOverview && activePhrase ? (
                 <>
-                  <h2 className="study-phrase">{current.phrase.phrase}</h2>
-                  <p className="study-meaning">{current.phrase.meaning}</p>
+                  <p className="answer-prompt">{"\u5148\u8ba4\u8bc6\uff0c\u4e0d\u6025\u7740\u7b54\u3002"}</p>
+                  <h2 className="study-phrase">{activePhrase.phrase}</h2>
+                  <MeaningSenses phrase={activePhrase} showExamples />
                   <div className="example-block">
                     <p className="example-en">
-                      {current.phrase.exampleEn || "英文例句待补全。"}
+                      {activePhrase.exampleEn || "英文例句待补全。"}
                     </p>
                     <p className="example-zh">
-                      {current.phrase.exampleZh || "中文翻译待补全。"}
+                      {activePhrase.exampleZh || "中文翻译待补全。"}
                     </p>
                   </div>
                 </>
@@ -360,12 +516,15 @@ export default function LearnPage() {
                         ? "写出英文短语"
                         : question.type === "contextChoice"
                           ? "选择最符合语境的短语"
+                        : question.type === "senseChoice"
+                          ? "选择句中短语的意思"
                           : "选择正确短语"}
                   </p>
                   <h2
                     className={`answer-question${
                       question.type === "contextChoice" ||
-                      question.type === "cloze"
+                      question.type === "cloze" ||
+                      question.type === "senseChoice"
                         ? " context"
                         : ""
                     }`}
@@ -417,6 +576,24 @@ export default function LearnPage() {
                     <i />
                     {feedback.correct ? "回答正确" : "还差一点"}
                   </div>
+                  {(question?.type === "spelling" ||
+                    (question?.type === "meaning" &&
+                      feedback.requiredCorrect > 1) ||
+                    question?.type === "senseChoice") ? (
+                    <p className="streak-note">
+                      {question.type === "spelling"
+                        ? "默写"
+                        : question.type === "senseChoice"
+                          ? "义项"
+                          : "释义"}
+                      {question.type === "senseChoice" ? "已完成" : "连续正确"}{" "}
+                      {feedback.correctStreak}/
+                      {feedback.requiredCorrect}
+                      {feedback.correctStreak < feedback.requiredCorrect
+                        ? "，继续下一张后再回来"
+                        : "，本轮通过"}
+                    </p>
+                  ) : null}
                   <div
                     className={`feedback-copy${feedback.correct ? "" : " wrong"}`}
                   >
@@ -437,9 +614,13 @@ export default function LearnPage() {
               ) : null}
             </article>
 
-            {step === "preview" ? (
+            {inOverview && activePhrase ? (
               <>
-                <p className="rating-label">你对这条短语的初始感觉是？</p>
+                <p className="rating-label">
+                  {needsInitialPreviewRating
+                    ? "你对这条短语的初始感觉是？"
+                    : "再次看到时，你现在的感觉是？"}
+                </p>
                 <div className="rating-options">
                   {RATING_LABELS.map((item) => (
                     <button
@@ -447,8 +628,11 @@ export default function LearnPage() {
                       className="rating-button"
                       key={item.value}
                       onClick={() => {
-                        setRating(item.value);
-                        void beginMeaningRecall();
+                        if (needsInitialPreviewRating) {
+                          void beginMeaningRecall(item.value);
+                        } else {
+                          void continuePreview(item.value === "know");
+                        }
                       }}
                     >
                       {item.label}
@@ -456,7 +640,13 @@ export default function LearnPage() {
                   ))}
                 </div>
                 <p className="quiet-note">
-                  自评只是第 0 天信号，最终等级由明天的四轮验证决定。
+                  {needsInitialPreviewRating
+                    ? "陌生、模糊、认识分别需要累计 4、3、2 次确认。"
+                    : `连续认识 ${
+                        previewItem?.progress?.previewRecognizedCount ?? 0
+                      }/${
+                        previewItem?.progress?.previewRequiredCount ?? 2
+                      }；选择陌生或模糊会重新计数。`}
                 </p>
               </>
             ) : step === "feedback" ? (
@@ -493,3 +683,4 @@ export default function LearnPage() {
     </main>
   );
 }
+

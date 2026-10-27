@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "@/lib/domain/constants";
+import { addDays } from "@/lib/domain/date";
 import {
   createInitialReviewState,
-  reviewUrgency,
+  compareReviewPriority,
   updateReviewSchedule,
 } from "@/lib/domain/scheduler";
 import { db } from "@/lib/data/db";
@@ -88,6 +89,44 @@ describe("review backlog fairness", () => {
     expect(session).toBeNull();
   });
 
+  it("uses unused capacity from the other track instead of wasting review slots", async () => {
+    await importPhrases(
+      normalizeImportJson(
+        source(
+          Array.from({ length: 100 }).map((_, index) => ({
+            phrase: `shared phrase ${index}`,
+            meaning: `shared meaning ${index}`,
+          })),
+        ),
+        "shared-capacity.json",
+      ),
+    );
+    const phrases = await db.phrases.toArray();
+    const states = phrases.map((phrase, index) => ({
+      ...createInitialReviewState(
+        phrase.id,
+        "fixed",
+        "B",
+        "2026-01-01",
+        index,
+      ),
+      nextReviewOn: "2026-01-02",
+    }));
+    await db.reviewStates.bulkPut(states);
+
+    const plan = await ensureReviewPlan(
+      "fixed",
+      "2026-01-02",
+      {
+        ...DEFAULT_SETTINGS,
+        fixedReviewLimit: 25,
+        verbReviewLimit: 25,
+        totalReviewLimit: 50,
+      },
+    );
+    expect(plan.phraseIds).toHaveLength(50);
+  });
+
   it("clears an 89-card due spike within two 50-card review days", () => {
     const cards = Array.from({ length: 89 }).map((_, index) => ({
       ...createInitialReviewState(
@@ -105,7 +144,7 @@ describe("review backlog fairness", () => {
       const due = cards.filter((card) => card.nextReviewOn <= date);
       const selected = due
         .sort(
-          (left, right) => reviewUrgency(right, date) - reviewUrgency(left, date),
+          (left, right) => compareReviewPriority(left, right, date),
         )
         .slice(0, 50);
       for (const card of selected) {
@@ -118,5 +157,37 @@ describe("review backlog fairness", () => {
     }
 
     expect(cards.every((card) => card.everReviewed)).toBe(true);
+  });
+
+  it("gives all 926 simultaneously due cards a bounded first review", () => {
+    const cards = Array.from({ length: 926 }).map((_, index) => ({
+      ...createInitialReviewState(
+        `fixed:full-deck-${index}`,
+        "fixed",
+        index % 2 === 0 ? "B" : "C",
+        "2026-01-01",
+        index,
+      ),
+      nextReviewOn: "2026-01-02",
+      firstReviewed: false,
+    }));
+    let date = "2026-01-02";
+
+    for (let day = 0; day < 19; day += 1) {
+      const due = cards
+        .filter((card) => card.nextReviewOn <= date)
+        .sort((left, right) => compareReviewPriority(left, right, date))
+        .slice(0, 50);
+      for (const card of due) {
+        card.firstReviewed = true;
+        Object.assign(
+          card,
+          updateReviewSchedule(card, 4, date, day + 1),
+        );
+      }
+      date = addDays(date, 1);
+    }
+
+    expect(cards.every((card) => card.firstReviewed)).toBe(true);
   });
 });

@@ -60,23 +60,34 @@ describe("day 0 four gates", () => {
     } as const;
 
     for (const gate of ["meaning", "production", "application", "exit"] as const) {
-      const queue = await getLearningGateQueue(session!);
-      expect(queue).toHaveLength(1);
       const type = types[gate];
-      const result = await recordLearningGateAnswer(
-        session!.id,
-        phraseId,
-        gate,
-        type,
-        skills[type],
-        true,
-        "answer",
-        "answer",
-        100,
-      );
-      expect(result.session.currentRound).toBe(
-        gate === "exit" ? 4 : (["meaning", "production", "application"].indexOf(gate) + 2),
-      );
+      const repeats = gate === "production" ? 3 : 1;
+      for (let attempt = 1; attempt <= repeats; attempt += 1) {
+        const queue = await getLearningGateQueue(session!);
+        expect(queue).toHaveLength(1);
+        const result = await recordLearningGateAnswer(
+          session!.id,
+          phraseId,
+          gate,
+          type,
+          skills[type],
+          true,
+          "answer",
+          "answer",
+          100,
+        );
+        if (attempt < repeats) {
+          expect(result.session.currentRound).toBe(
+            ["meaning", "production", "application", "exit"].indexOf(gate) + 1,
+          );
+        } else {
+          expect(result.session.currentRound).toBe(
+            gate === "exit"
+              ? 4
+              : ["meaning", "production", "application"].indexOf(gate) + 2,
+          );
+        }
+      }
     }
 
     const progress = await db.cardProgress.get(phraseId);
@@ -111,17 +122,20 @@ describe("day 1 four calibration rounds", () => {
       keyof typeof gateData,
       { type: "meaning" | "spelling" | "contextChoice" | "phraseChoice"; skill: "recognition" | "production" | "usage" | "pattern" },
     ][]) {
-      await recordLearningGateAnswer(
-        session!.id,
-        phraseId,
-        gate,
-        data.type,
-        data.skill,
-        true,
-        "answer",
-        "answer",
-        100,
-      );
+      const repeats = gate === "production" ? 3 : 1;
+      for (let attempt = 1; attempt <= repeats; attempt += 1) {
+        await recordLearningGateAnswer(
+          session!.id,
+          phraseId,
+          gate,
+          data.type,
+          data.skill,
+          true,
+          "answer",
+          "answer",
+          100,
+        );
+      }
     }
     await db.cardProgress.update(phraseId, { calibrationDueOn: "2026-01-02" });
 
@@ -131,26 +145,30 @@ describe("day 1 four calibration rounds", () => {
       DEFAULT_SETTINGS,
     );
     for (let round = 1; round <= 4; round += 1) {
-      const queue = await getCalibrationQueue(plan);
-      expect(queue).toHaveLength(1);
-      const item = queue[0];
-      const result = await recordCalibrationAnswer(
-        plan.id,
-        phraseId,
-        item.questionType,
-        item.questionType === "meaning"
-          ? "recognition"
-          : item.questionType === "spelling"
-            ? "production"
-            : item.questionType === "phraseChoice"
-              ? "pattern"
-              : "usage",
-        true,
-        "answer",
-        "answer",
-        100,
-      );
-      plan = result.plan;
+      const repeats = round === 4 ? 3 : 1;
+      for (let attempt = 1; attempt <= repeats; attempt += 1) {
+        const queue = await getCalibrationQueue(plan);
+        expect(queue).toHaveLength(1);
+        const item = queue[0];
+        const result = await recordCalibrationAnswer(
+          plan.id,
+          phraseId,
+          item.questionType,
+          item.questionType === "meaning"
+            ? "recognition"
+            : item.questionType === "spelling"
+              ? "production"
+              : item.questionType === "phraseChoice"
+                ? "pattern"
+                : "usage",
+          true,
+          "answer",
+          "answer",
+          100,
+        );
+        plan = result.plan;
+        if (attempt < repeats) expect(plan.currentRound).toBe(4);
+      }
     }
     plan = (await getCalibrationPlan("fixed", "2026-01-02"))!;
     expect(plan.status).toBe("completed");
