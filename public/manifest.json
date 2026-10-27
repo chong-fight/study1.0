@@ -1,0 +1,19 @@
+{
+  "name": "短词记 2.0",
+  "short_name": "短词记",
+  "description": "本地优先的英语短语与句型记忆工具",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fcfaf6",
+  "theme_color": "#e7dac7",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
