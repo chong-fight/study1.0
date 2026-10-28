@@ -323,7 +323,7 @@ describe("learning experience", () => {
     expect(second.passed).toBe(true);
   });
 
-  it("requires three consecutive correct spelling attempts and resets on error", async () => {
+  it("requires three correct spelling attempts and keeps progress after an error", async () => {
     await importPhrases(
       normalizeImportJson(
         source([
@@ -368,6 +368,7 @@ describe("learning experience", () => {
       100,
     );
     expect(first.correctStreak).toBe(1);
+    expect(first.correctCount).toBe(1);
     expect(first.passed).toBe(false);
 
     const reset = await recordLearningGateAnswer(
@@ -382,8 +383,9 @@ describe("learning experience", () => {
       100,
     );
     expect(reset.correctStreak).toBe(0);
+    expect(reset.correctCount).toBe(1);
 
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
       const result = await recordLearningGateAnswer(
         session!.id,
         phraseId,
@@ -395,7 +397,7 @@ describe("learning experience", () => {
         "look into",
         100,
       );
-      expect(result.passed).toBe(attempt === 3);
+      expect(result.passed).toBe(attempt === 2);
     }
   });
 

@@ -45,10 +45,30 @@ describe("text matching", () => {
     expect(isAcceptedMeaning("放弃", "参与；参加")).toBe(false);
   });
 
+  it("normalizes ellipsis placeholders and accepts meaningful partial Chinese", () => {
+    expect(isAcceptedMeaning("对...感激", "对……感激")).toBe(true);
+    expect(isAcceptedMeaning("对感激", "对……感激")).toBe(true);
+    expect(isAcceptedMeaning("感激", "对……感激")).toBe(true);
+    expect(isAcceptedMeaning("什么", "对……感激")).toBe(false);
+    expect(isAcceptedMeaning("感", "对……感激")).toBe(false);
+  });
+
   it("requires normalized English punctuation and spacing", () => {
     expect(isAcceptedPhrase("Take part in", "take part in")).toBe(true);
     expect(isAcceptedPhrase("take  part in", "take part in")).toBe(true);
     expect(isAcceptedPhrase("take in", "take part in")).toBe(false);
+  });
+
+  it("accepts placeholder-free and slash-alternative English answers", () => {
+    expect(
+      isAcceptedPhrase(
+        "can't bear doing sth.",
+        "can't bear to do sth. / can't bear doing sth.",
+      ),
+    ).toBe(true);
+    expect(
+      isAcceptedPhrase("accuse sb of sth", "accuse sb. of sth."),
+    ).toBe(true);
   });
 
   it("shuffles by a stable round seed instead of the learning-list order", () => {

@@ -551,6 +551,7 @@ export async function recordLearningGateAnswer(
   completed: boolean;
   passed: boolean;
   correctStreak: number;
+  correctCount: number;
   requiredCorrect: number;
 }> {
   return db.transaction(
@@ -576,6 +577,7 @@ export async function recordLearningGateAnswer(
           completed: normalized.status === "completed",
           passed: true,
           correctStreak: 1,
+          correctCount: 1,
           requiredCorrect: 1,
         };
       }
@@ -599,11 +601,21 @@ export async function recordLearningGateAnswer(
         : correct
           ? (current?.correctStreak ?? 0) + 1
           : 0;
+      const correctCount =
+        questionType === "spelling"
+          ? (current?.correctCount ?? 0) + (correct ? 1 : 0)
+          : correct
+            ? 1
+            : 0;
+      const incorrectAttempts =
+        (current?.incorrectAttempts ?? 0) + (correct ? 0 : 1);
       const nextResult: Day0GateResult = current
         ? {
             ...current,
             finalCorrect: current.finalCorrect || correct,
             correctStreak,
+            correctCount,
+            incorrectAttempts,
             attempts: current.attempts + 1,
             lastAttemptAt: Date.now(),
           }
@@ -612,6 +624,8 @@ export async function recordLearningGateAnswer(
             firstCorrect: correct,
             finalCorrect: correct,
             correctStreak,
+            correctCount,
+            incorrectAttempts,
             attempts: 1,
             lastAttemptAt: Date.now(),
           };
@@ -643,7 +657,10 @@ export async function recordLearningGateAnswer(
         senseIndex,
       });
 
-      const passed = correct && correctStreak >= requiredCorrect;
+      const passed =
+        questionType === "spelling"
+          ? correctCount >= requiredCorrect
+          : correct && correctStreak >= requiredCorrect;
       if (passed) {
         normalized.roundPassedIds[roundKey] = unique([
           ...normalized.roundPassedIds[roundKey],
@@ -667,6 +684,7 @@ export async function recordLearningGateAnswer(
             completed: true,
             passed,
             correctStreak,
+            correctCount,
             requiredCorrect,
           };
         }
@@ -679,6 +697,7 @@ export async function recordLearningGateAnswer(
         completed: false,
         passed,
         correctStreak,
+        correctCount,
         requiredCorrect,
       };
     },
@@ -1071,11 +1090,21 @@ export async function recordCalibrationAnswer(
       const correctStreak = correct
         ? (current?.correctStreak ?? 0) + 1
         : 0;
+      const correctCount =
+        questionType === "spelling"
+          ? (current?.correctCount ?? 0) + (correct ? 1 : 0)
+          : correct
+            ? 1
+            : 0;
+      const incorrectAttempts =
+        (current?.incorrectAttempts ?? 0) + (correct ? 0 : 1);
       const nextResult = current
         ? {
             ...current,
             finalCorrect: current.finalCorrect || correct,
             correctStreak,
+            correctCount,
+            incorrectAttempts,
             attempts: current.attempts + 1,
             lastAttemptAt: attemptAt,
           }
@@ -1083,6 +1112,8 @@ export async function recordCalibrationAnswer(
             firstCorrect: correct,
             finalCorrect: correct,
             correctStreak,
+            correctCount,
+            incorrectAttempts,
             attempts: 1,
             lastAttemptAt: attemptAt,
           };
@@ -1120,12 +1151,20 @@ export async function recordCalibrationAnswer(
       }
 
       let failed = false;
-      if (correct && correctStreak >= requiredCorrect) {
+      if (
+        (questionType === "spelling"
+          ? correctCount >= requiredCorrect
+          : correct && correctStreak >= requiredCorrect)
+      ) {
         plan.roundPassedIds[roundKey] = unique([
           ...plan.roundPassedIds[roundKey],
           phraseId,
         ]);
-      } else if (nextResult.attempts >= 3) {
+      } else if (
+        (questionType === "spelling"
+          ? incorrectAttempts >= 3
+          : nextResult.attempts >= 3)
+      ) {
         failed = true;
         plan.failedIds = unique([...plan.failedIds, phraseId]);
         const progress = await db.cardProgress.get(phraseId);
@@ -1330,6 +1369,7 @@ export async function startReviewAttempt(
     passStartIndex: 0,
     reviewRound: 1,
     spellingCorrectStreak: 0,
+    spellingCorrectCount: 0,
     startedAt: Date.now(),
   };
   plan.attempts[phraseId] = attempt;
@@ -1435,6 +1475,10 @@ export async function recordReviewAnswer(
             ? (attempt.spellingCorrectStreak ?? 0) + 1
             : 0
           : (attempt.spellingCorrectStreak ?? 0);
+      const spellingCorrectCount =
+        questionType === "spelling"
+          ? (attempt.spellingCorrectCount ?? 0) + (correct ? 1 : 0)
+          : (attempt.spellingCorrectCount ?? 0);
 
       attempt.answers.push({
         questionType,
@@ -1445,6 +1489,7 @@ export async function recordReviewAnswer(
         responseTimeMs,
       });
       attempt.spellingCorrectStreak = spellingCorrectStreak;
+      attempt.spellingCorrectCount = spellingCorrectCount;
       attempt.lastAnsweredAt = Date.now();
 
       const log: ReviewLog = {
@@ -1478,13 +1523,19 @@ export async function recordReviewAnswer(
         }
       }
 
-      if (questionType === "spelling" && spellingCorrectStreak < 3) {
+      const passStartBeforeCheck = attempt.passStartIndex ?? 0;
+      const passSpellingCorrect = attempt.answers
+        .slice(passStartBeforeCheck)
+        .filter(
+          (item) => item.questionType === "spelling" && item.correct,
+        ).length;
+      if (questionType === "spelling" && passSpellingCorrect < 3) {
         const remainingSpelling = attempt.types
           .slice(attempt.answers.length)
           .filter((item) => item === "spelling").length;
         const missingSpelling = Math.max(
           0,
-          3 - spellingCorrectStreak - remainingSpelling,
+          3 - passSpellingCorrect - remainingSpelling,
         );
         if (missingSpelling > 0) {
           attempt.types.splice(
@@ -1497,9 +1548,19 @@ export async function recordReviewAnswer(
 
       if (attempt.answers.length >= attempt.types.length) {
         const passStart = attempt.passStartIndex ?? 0;
-        const passPassed = attempt.answers
-          .slice(passStart)
+        const passAnswers = attempt.answers.slice(passStart);
+        const passHasSpelling = passAnswers.some(
+          (item) => item.questionType === "spelling",
+        );
+        const passSpellingPassed =
+          !passHasSpelling ||
+          passAnswers.filter(
+            (item) => item.questionType === "spelling" && item.correct,
+          ).length >= 3;
+        const otherTypesPassed = passAnswers
+          .filter((item) => item.questionType !== "spelling")
           .every((item) => item.correct);
+        const passPassed = passSpellingPassed && otherTypesPassed;
         if (passPassed) {
           await finalizeReviewAttempt(plan, attempt);
         } else if (

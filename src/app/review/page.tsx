@@ -207,8 +207,14 @@ export default function ReviewPage() {
       question.senseIndex,
     );
     setPlan(result.plan);
-    const spellingCorrectStreak =
-      result.plan.attempts[currentPhraseId]?.spellingCorrectStreak ?? 0;
+    const latestAttempt = result.plan.attempts[currentPhraseId];
+    const passStart = latestAttempt?.passStartIndex ?? 0;
+    const spellingCorrectCount =
+      latestAttempt?.answers
+        .slice(passStart)
+        .filter(
+          (item) => item.questionType === "spelling" && item.correct,
+        ).length ?? 0;
     const selectedSense =
       question.type === "senseChoice" &&
       question.senseIndex !== undefined
@@ -229,7 +235,7 @@ export default function ReviewPage() {
       synonyms: item.phrase.synonyms.map(
         (entry) => `${entry.phrase}：${entry.usage}`,
       ),
-      correctStreak: spellingCorrectStreak,
+      correctStreak: spellingCorrectCount,
       requiredCorrect: 3,
     });
     setAnswered(true);
@@ -486,7 +492,7 @@ export default function ReviewPage() {
                   </div>
                   {question.type === "spelling" ? (
                     <p className="streak-note">
-                      默写连续正确 {feedback.correctStreak}/
+                      默写累计写对 {feedback.correctStreak}/
                       {feedback.requiredCorrect}
                       {feedback.correctStreak < feedback.requiredCorrect
                         ? "，稍后会再次出现"

@@ -58,6 +58,7 @@ export default function CalibrationSession({
     exampleZh: string;
     synonyms: string[];
     correctStreak: number;
+    correctCount: number;
     requiredCorrect: number;
     passed: boolean;
   } | null>(null);
@@ -151,6 +152,8 @@ export default function CalibrationSession({
       const requiredCorrect = question.type === "spelling" ? 3 : 1;
       const correctStreak =
         roundResult?.correctStreak ?? (correct ? 1 : 0);
+      const correctCount =
+        roundResult?.correctCount ?? (correct ? 1 : 0);
       const selectedSense =
         item &&
         question.type === "senseChoice" &&
@@ -176,6 +179,7 @@ export default function CalibrationSession({
             (entry) => `${entry.phrase}：${entry.usage}`,
           ) ?? [],
         correctStreak,
+        correctCount,
         requiredCorrect,
         passed: correct && correctStreak >= requiredCorrect,
       });
@@ -379,8 +383,15 @@ export default function CalibrationSession({
                         : question.type === "senseChoice"
                           ? "义项"
                           : "释义"}
-                      {question.type === "senseChoice" ? "已完成" : "连续正确"}{" "}
-                      {feedback.correctStreak}/
+                      {question.type === "senseChoice"
+                        ? "已完成"
+                        : question.type === "spelling"
+                          ? "累计写对"
+                          : "连续正确"}{" "}
+                      {question.type === "spelling"
+                        ? feedback.correctCount
+                        : feedback.correctStreak}
+                      /
                       {feedback.requiredCorrect}
                       {feedback.correctStreak < feedback.requiredCorrect
                         ? "，继续下一张后再回来"

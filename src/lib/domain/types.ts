@@ -97,6 +97,8 @@ export interface Day0GateResult {
   firstCorrect: boolean;
   finalCorrect: boolean;
   correctStreak?: number;
+  correctCount?: number;
+  incorrectAttempts?: number;
   attempts: number;
   lastAttemptAt: number;
 }
@@ -202,6 +204,7 @@ export interface ReviewAttempt {
   passStartIndex?: number;
   reviewRound?: number;
   spellingCorrectStreak?: number;
+  spellingCorrectCount?: number;
   lastAnsweredAt?: number;
   startedAt: number;
   finalizedAt?: number;
@@ -224,6 +227,8 @@ export interface CalibrationPlan {
           firstCorrect: boolean;
           finalCorrect: boolean;
           correctStreak?: number;
+          correctCount?: number;
+          incorrectAttempts?: number;
           attempts: number;
           lastAttemptAt: number;
         }

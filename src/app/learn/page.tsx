@@ -71,6 +71,7 @@ export default function LearnPage() {
     exampleZh: string;
     synonyms: string[];
     correctStreak: number;
+    correctCount: number;
     requiredCorrect: number;
   } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -347,6 +348,7 @@ export default function LearnPage() {
           (item) => `${item.phrase}：${item.usage}`,
         ),
         correctStreak: result.correctStreak,
+        correctCount: result.correctCount,
         requiredCorrect: result.requiredCorrect,
       });
       setStep("feedback");
@@ -586,8 +588,15 @@ export default function LearnPage() {
                         : question.type === "senseChoice"
                           ? "义项"
                           : "释义"}
-                      {question.type === "senseChoice" ? "已完成" : "连续正确"}{" "}
-                      {feedback.correctStreak}/
+                      {question.type === "senseChoice"
+                        ? "已完成"
+                        : question.type === "spelling"
+                          ? "累计写对"
+                          : "连续正确"}{" "}
+                      {question.type === "spelling"
+                        ? feedback.correctCount
+                        : feedback.correctStreak}
+                      /
                       {feedback.requiredCorrect}
                       {feedback.correctStreak < feedback.requiredCorrect
                         ? "，继续下一张后再回来"

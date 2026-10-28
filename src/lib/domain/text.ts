@@ -28,7 +28,10 @@ export function acceptedMeaningParts(meaning: string): string[] {
     .filter(Boolean);
 }
 
-export function isAcceptedMeaning(answer: string, meaning: string): boolean {
+export function isAcceptedMeaningLegacy(
+  answer: string,
+  meaning: string,
+): boolean {
   const candidate = normalizeChinese(answer);
   if (candidate.length < 1) return false;
 
@@ -40,7 +43,51 @@ export function isAcceptedMeaning(answer: string, meaning: string): boolean {
   });
 }
 
-export function isAcceptedPhrase(answer: string, phrase: string): boolean {
+export function isAcceptedMeaning(answer: string, meaning: string): boolean {
+  const candidate = looseChinese(answer);
+  if (!candidate || candidate === "◇") return false;
+  if (candidate.length < 2 && !candidate.includes("◇")) return false;
+
+  return meaning
+    .split(/[\uFF0C,\uFF1B;\u3002\uFF01\uFF1F?|]/)
+    .map(looseChinese)
+    .filter(Boolean)
+    .some((part) => {
+      if (candidate === part) return true;
+      if (candidate.length >= 2 && part.includes(candidate)) return true;
+      if (part.length >= 2 && candidate.includes(part)) return true;
+      const candidateCore = candidate.replace(/◇/g, "");
+      const partCore = part.replace(/◇/g, "");
+      return (
+        candidateCore.length >= 2 &&
+        partCore.length >= 2 &&
+        (candidateCore.includes(partCore) ||
+          partCore.includes(candidateCore))
+      );
+    });
+}
+
+function looseChinese(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\u2026+|\.{2,}/g, "\u25C7")
+    .replace(
+      /(?:\u67D0\u4EBA\u7269|\u67D0\u4E8B\u7269|\u67D0\u4EBA|\u67D0\u7269|\u67D0\u4E8B|\u4EC0\u4E48)/g,
+      "\u25C7",
+    )
+    .replace(
+      /[\s\uFF0C,\u3002\uFF1B;\uFF1A:\u3001\uFF01!\uFF1F?\uFF08\uFF09()\u3010\u3011\[\]\u201C\u201D"'\u300A\u300B<>]/g,
+      "",
+    )
+    .trim();
+}
+
+export function isAcceptedPhraseLegacy(
+  answer: string,
+  phrase: string,
+): boolean {
   const candidate = normalizeEnglishAnswer(answer);
   const alternatives = phrase
     .split(/\s*=\s*/)
@@ -54,6 +101,38 @@ export function isAcceptedPhrase(answer: string, phrase: string): boolean {
       .replace(/\b(?:sb|sth)\.?/gi, " "),
   );
   return Boolean(withoutPlaceholders) && candidate === withoutPlaceholders;
+}
+
+export function isAcceptedPhrase(answer: string, phrase: string): boolean {
+  const candidate = normalizeEnglishAnswer(answer);
+  const candidateWithoutPlaceholders =
+    stripEnglishPlaceholders(candidate);
+  const alternatives = phrase
+    .split(/\s+(?:=|\uFF0F|\/)\s+/)
+    .flatMap((item) => item.split(/\s*=\s*/))
+    .map(normalizeEnglishAnswer)
+    .filter(Boolean);
+  const accepted = new Set<string>();
+  for (const alternative of alternatives) {
+    accepted.add(alternative);
+    accepted.add(stripEnglishPlaceholders(alternative));
+  }
+  return (
+    accepted.has(candidate) ||
+    accepted.has(candidateWithoutPlaceholders)
+  );
+}
+
+function stripEnglishPlaceholders(value: string): string {
+  return normalizeEnglishAnswer(
+    value
+      .replace(
+        /\s*\b(?:somebody|something|sb|sth)\.?\s*\/\s*(?:somebody|something|sb|sth)\.?/gi,
+        " ",
+      )
+      .replace(/\b(?:somebody|something|sb|sth)\.?/gi, " ")
+      .replace(/\s+/g, " "),
+  );
 }
 
 export function containsPhrase(sentence: string, phrase: string): boolean {
