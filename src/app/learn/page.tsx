@@ -3,9 +3,10 @@
 import Link from "next/link";
 import { ArrowLeft, ArrowRight, BookOpen } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import MeaningSenses from "@/components/MeaningSenses";
+import PreviewStudyCard from "@/components/PreviewStudyCard";
 import { TRACKS, TRACK_LIST } from "@/lib/domain/constants";
 import { isPreviewRecognized } from "@/lib/domain/learning-policy";
+import { orderPreviewCandidates } from "@/lib/domain/preview-order";
 import {
   buildQuestion,
   canUseContextChoice,
@@ -15,7 +16,7 @@ import {
   contextExample,
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
-import { seededShuffle, shuffle } from "@/lib/domain/text";
+import { shuffle } from "@/lib/domain/text";
 import type {
   LearningSession,
   QuestionType,
@@ -48,12 +49,6 @@ const GATE_LABELS = [
   "出口测试",
 ];
 
-const RATING_LABELS: { value: Rating; label: string }[] = [
-  { value: "unknown", label: "陌生" },
-  { value: "vague", label: "模糊" },
-  { value: "know", label: "认识" },
-];
-
 export default function LearnPage() {
   const today = useLocalDay();
   const [trackId, setTrackId] = useState<TrackId>("fixed");
@@ -76,44 +71,31 @@ export default function LearnPage() {
   } | null>(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const [previewBusy, setPreviewBusy] = useState(false);
   const [starting, setStarting] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [error, setError] = useState("");
   const startedAt = useRef(0);
+  const previewSaving = useRef(false);
   useQuestionScroll(Boolean(question), Boolean(feedback));
 
   const current = queue[0];
-  const previewShuffleOrder = seededShuffle(
-    learningCards.map((item) => item.phrase.id),
+  const previewCards = learningCards.filter(
+    (item) => !isPreviewRecognized(item.progress),
+  );
+  const previewCardById = new Map(
+    previewCards.map((item) => [item.phrase.id, item]),
+  );
+  const previewQueue = orderPreviewCandidates(
+    previewCards.map((item) => ({
+      id: item.phrase.id,
+      hasInitialRating: Boolean(item.progress?.day0Rating),
+      recognizedCount: item.progress?.previewRecognizedCount ?? 0,
+    })),
     `${session?.id ?? today}:preview`,
-  );
-  const previewShuffleRank = new Map(
-    previewShuffleOrder.map((id, index) => [id, index]),
-  );
-  const learningCardOrder = new Map(
-    learningCards.map((item, index) => [item.phrase.id, index]),
-  );
-  const previewQueue = learningCards
-    .filter((item) => !isPreviewRecognized(item.progress))
-    .sort((left, right) => {
-      const leftRated = Boolean(left.progress?.day0Rating);
-      const rightRated = Boolean(right.progress?.day0Rating);
-      if (leftRated !== rightRated) return leftRated ? 1 : -1;
-      if (!leftRated) {
-        return (
-          (learningCardOrder.get(left.phrase.id) ?? 0) -
-          (learningCardOrder.get(right.phrase.id) ?? 0)
-        );
-      }
-      const countDifference =
-        (left.progress?.previewRecognizedCount ?? 0) -
-        (right.progress?.previewRecognizedCount ?? 0);
-      if (countDifference !== 0) return countDifference;
-      return (
-        (previewShuffleRank.get(left.phrase.id) ?? 0) -
-        (previewShuffleRank.get(right.phrase.id) ?? 0)
-      );
-    });
+  )
+    .map((id) => previewCardById.get(id))
+    .filter((item): item is LearningCard => Boolean(item));
   const previewItem = previewQueue[0];
   const previewCompletedCount = learningCards.length - previewQueue.length;
   const needsInitialPreviewRating = !previewItem?.progress?.day0Rating;
@@ -265,43 +247,41 @@ export default function LearnPage() {
     }
   }
 
-  async function beginMeaningRecall(nextRating: Rating) {
-    if (!session || !previewItem) return;
+  async function ratePreview(nextRating: Rating) {
+    if (
+      !session ||
+      !previewItem ||
+      previewSaving.current
+    ) {
+      return;
+    }
+
+    previewSaving.current = true;
+    setPreviewBusy(true);
     setError("");
     try {
-      await recordLearningPreviewRating(
-        session.id,
-        previewItem.phrase.id,
-        nextRating,
-      );
+      if (needsInitialPreviewRating) {
+        await recordLearningPreviewRating(
+          session.id,
+          previewItem.phrase.id,
+          nextRating,
+        );
+      } else {
+        await recordLearningPreviewRecognition(
+          session.id,
+          previewItem.phrase.id,
+          nextRating === "know",
+        );
+      }
       await loadSession(trackId);
       setAnswer("");
       setSelected("");
       setFeedback(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "学习状态保存失败");
-    }
-  }
-
-  async function continuePreview(recognized: boolean) {
-    if (!session || !previewItem) return;
-    setError("");
-    try {
-      await recordLearningPreviewRecognition(
-        session.id,
-        previewItem.phrase.id,
-        recognized,
-      );
-      await loadSession(trackId);
-      setAnswer("");
-      setSelected("");
-      setFeedback(null);
-    } catch (caught) {
-      setError(
-        caught instanceof Error
-          ? caught.message
-          : "\u5b66\u4e60\u72b6\u6001\u4fdd\u5b58\u5931\u8d25",
-      );
+    } finally {
+      previewSaving.current = false;
+      setPreviewBusy(false);
     }
   }
 
@@ -485,31 +465,30 @@ export default function LearnPage() {
           </div>
         ) : (
           <>
-            <article className="focus-card">
-              <div className="card-meta">
-                <span className="outline-tag">{activePhrase?.entryType}</span>
-                <span className="card-index">
-                  {inOverview
-                    ? `预览 ${previewCompletedCount + 1}/${total}`
-                    : `${GATE_LABELS[currentRound - 1]} · ${roundDone + 1}/${total}`}
-                </span>
-              </div>
+            {inOverview && previewItem ? (
+              <PreviewStudyCard
+                key={`${previewItem.phrase.id}:${
+                  previewItem.progress?.day0Rating ?? "unrated"
+                }:${previewItem.progress?.previewRecognizedCount ?? 0}:${
+                  previewItem.progress?.updatedAt ?? 0
+                }`}
+                phrase={previewItem.phrase}
+                progress={previewItem.progress}
+                position={previewCompletedCount + 1}
+                total={total}
+                busy={previewBusy}
+                onRate={ratePreview}
+              />
+            ) : (
+              <article className="focus-card">
+                <div className="card-meta">
+                  <span className="outline-tag">{activePhrase?.entryType}</span>
+                  <span className="card-index">
+                    {GATE_LABELS[currentRound - 1]} · {roundDone + 1}/{total}
+                  </span>
+                </div>
 
-              {inOverview && activePhrase ? (
-                <>
-                  <p className="answer-prompt">{"\u5148\u8ba4\u8bc6\uff0c\u4e0d\u6025\u7740\u7b54\u3002"}</p>
-                  <h2 className="study-phrase">{activePhrase.phrase}</h2>
-                  <MeaningSenses phrase={activePhrase} showExamples />
-                  <div className="example-block">
-                    <p className="example-en">
-                      {activePhrase.exampleEn || "英文例句待补全。"}
-                    </p>
-                    <p className="example-zh">
-                      {activePhrase.exampleZh || "中文翻译待补全。"}
-                    </p>
-                  </div>
-                </>
-              ) : step === "answer" && question ? (
+                {step === "answer" && question ? (
                 <div className="answer-area" style={{ marginTop: 0 }}>
                   <p className="answer-prompt">
                     {question.type === "meaning"
@@ -621,71 +600,40 @@ export default function LearnPage() {
                   ) : null}
                 </div>
               ) : null}
-            </article>
-
-            {inOverview && activePhrase ? (
-              <>
-                <p className="rating-label">
-                  {needsInitialPreviewRating
-                    ? "你对这条短语的初始感觉是？"
-                    : "再次看到时，你现在的感觉是？"}
-                </p>
-                <div className="rating-options">
-                  {RATING_LABELS.map((item) => (
-                    <button
-                      type="button"
-                      className="rating-button"
-                      key={item.value}
-                      onClick={() => {
-                        if (needsInitialPreviewRating) {
-                          void beginMeaningRecall(item.value);
-                        } else {
-                          void continuePreview(item.value === "know");
-                        }
-                      }}
-                    >
-                      {item.label}
-                    </button>
-                  ))}
-                </div>
-                <p className="quiet-note">
-                  {needsInitialPreviewRating
-                    ? "陌生、模糊、认识分别需要累计 4、3、2 次确认。"
-                    : `连续认识 ${
-                        previewItem?.progress?.previewRecognizedCount ?? 0
-                      }/${
-                        previewItem?.progress?.previewRequiredCount ?? 2
-                      }；选择陌生或模糊会重新计数。`}
-                </p>
-              </>
-            ) : step === "feedback" ? (
-              <div style={{ marginTop: 18 }}>
-                <button
-                  type="button"
-                  className="primary-button wide"
-                  onClick={continueLearning}
-                >
-                  {feedback?.correct
-                    ? completed
-                      ? "完成第 0 天"
-                      : "继续"
-                    : "继续，稍后重试"}
-                </button>
-              </div>
-            ) : (
-              <div style={{ marginTop: 18 }}>
-                <button
-                  type="button"
-                  className="primary-button wide"
-                  disabled={
-                    submitting || (question?.options ? !selected : !answer.trim())
-                  }
-                  onClick={submitAnswer}
-                >
-                  {submitting ? "正在记录…" : "确认答案"}
-                </button>
-              </div>
+              </article>
             )}
+
+            {!inOverview ? (
+              step === "feedback" ? (
+                <div style={{ marginTop: 18 }}>
+                  <button
+                    type="button"
+                    className="primary-button wide"
+                    onClick={continueLearning}
+                  >
+                    {feedback?.correct
+                      ? completed
+                        ? "完成第 0 天"
+                        : "继续"
+                      : "继续，稍后重试"}
+                  </button>
+                </div>
+              ) : (
+                <div style={{ marginTop: 18 }}>
+                  <button
+                    type="button"
+                    className="primary-button wide"
+                    disabled={
+                      submitting ||
+                      (question?.options ? !selected : !answer.trim())
+                    }
+                    onClick={submitAnswer}
+                  >
+                    {submitting ? "正在记录…" : "确认答案"}
+                  </button>
+                </div>
+              )
+            ) : null}
           </>
         )}
       </div>

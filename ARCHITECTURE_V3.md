@@ -262,3 +262,13 @@ NEXT_PUBLIC_LOCAL_PREVIEW_SEED=1
 - 不把私人 JSON 打进 GitHub 仓库
 - 不进行推倒重写
 - 不宣称现有固定次数是普遍最优参数
+
+## 13. 预览翻转卡迭代
+
+本轮只做局部解耦，不改变数据事务和复习调度：
+
+- `src/components/PreviewStudyCard.tsx` 负责纯英文正面、3D 翻转、释义例句背面和三个评价入口。
+- `src/app/learn/page.tsx` 保留会话加载、评价写入和后续关卡切换。
+- `src/lib/domain/preview-order.ts` 集中处理预览队列：未评价卡优先、评价次数少的卡优先，并按初始轮和各认识次数层级分别稳定乱序。
+- 每次评价保存后 `CardProgress.updatedAt` 改变，预览组件重新挂载，因此每次重新出现都从未翻转的纯英文正面开始。
+- `tests/preview-order.test.ts` 覆盖乱序轮换、陌生/模糊清零后的重新排队，以及不翻转直接点“认识”的累计规则。
