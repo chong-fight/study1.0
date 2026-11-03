@@ -49,6 +49,16 @@ export function selectNewPhrases(
     if (phrase.confusionGroup) groups.add(phrase.confusionGroup);
   }
 
+  if (selected.length < limit) {
+    const selectedIds = new Set(selected.map((phrase) => phrase.id));
+    for (const phrase of ordered) {
+      if (selected.length >= limit) break;
+      if (learnedIds.has(phrase.id) || selectedIds.has(phrase.id)) continue;
+      selected.push(phrase);
+      selectedIds.add(phrase.id);
+    }
+  }
+
   return selected;
 }
 

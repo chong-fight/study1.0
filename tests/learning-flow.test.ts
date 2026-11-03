@@ -43,18 +43,33 @@ describe("new learning selection", () => {
       phrase("fixed:join-in", "join in", "", ["take part in"]),
       phrase("fixed:a-few", "a few"),
     ];
-    const selected = selectNewPhrases(
+    const preferred = selectNewPhrases(
       items,
       new Set(),
-      3,
+      2,
       new Set(),
       () => 0,
     );
-    const ids = selected.map((item) => item.id);
-    expect(ids.includes("fixed:take-part-in") && ids.includes("fixed:join-in")).toBe(
-      false,
-    );
+    const preferredIds = preferred.map((item) => item.id);
+    expect(
+      preferredIds.includes("fixed:take-part-in") &&
+        preferredIds.includes("fixed:join-in"),
+    ).toBe(false);
     expect(phrasesConflict(items[0], items[1])).toBe(true);
+  });
+
+  it("fills the requested daily limit when conflict avoidance alone is too strict", () => {
+    const items = Array.from({ length: 4 }, (_, index) =>
+      phrase(
+        `fixed:shared-${index}`,
+        `shared phrase ${index}`,
+        "shared-group",
+      ),
+    );
+
+    expect(
+      selectNewPhrases(items, new Set(), 4, new Set(), () => 0),
+    ).toHaveLength(4);
   });
 
   it("honors a zero daily limit", () => {

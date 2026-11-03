@@ -64,45 +64,68 @@ export default function TodayPage() {
       const newTotal = track.session
         ? track.learningPhrases.length
         : track.newPhrases.length;
-      const plannedReviews = track.plan
-        ? track.plan.phraseIds.length
-        : track.calibrationPhrases.length + track.duePhrases.length;
-      return sum + newTotal + plannedReviews;
+      return sum + newTotal + track.reviewPhrases.length;
     }, 0);
     const done = visibleTracks.reduce(
       (sum, track) =>
         sum +
         track.learningDone +
-        (track.calibrationPlan?.status === "completed"
-          ? track.calibrationPlan.phraseIds.length
-          : 0) +
-        (track.plan?.completedPhraseIds.length ?? 0),
+        track.reviewSettledIds.length,
       0,
     );
     return { total, done };
   }, [visibleTracks]);
 
   const hasDue = data.some(
-    (track) =>
-      track.calibrationPhrases.length > 0 || track.duePhrases.length > 0,
+    (track) => track.reviewPendingIds.length > 0,
   );
   const dueCount = data.reduce(
+    (sum, track) => sum + track.reviewPendingIds.length,
+    0,
+  );
+  const actualDueCount = data.reduce(
     (sum, track) =>
       sum + track.calibrationPhrases.length + track.duePhrases.length,
     0,
   );
+  const boosterOnly =
+    hasDue &&
+    actualDueCount === 0 &&
+    data.some(
+      (track) =>
+        track.plan?.kind === "booster" && track.plan.status === "active",
+    );
   const newLearningThrottled =
     dueCount >= settings.totalReviewLimit * 0.8;
   const newLearningPaused = dueCount >= settings.totalReviewLimit;
   const hasLearning = data.some(
-    (track) => Boolean(track.session) || track.newPhrases.length > 0,
+    (track) =>
+      track.session?.status === "active" || track.newPhrases.length > 0,
   );
-  const primaryHref = hasDue ? "/review" : hasLearning ? "/learn" : "/import";
+  const boosterTrack = data.find(
+    (track) => track.boosterPhrases.length > 0,
+  )?.trackId;
+  const failedTodayCount = data.reduce(
+    (sum, track) => sum + track.reviewFailedIds.length,
+    0,
+  );
+  const hasBooster = Boolean(boosterTrack);
+  const primaryHref = hasDue
+    ? "/review"
+    : hasLearning
+      ? "/learn"
+      : hasBooster
+        ? `/review?booster=1&track=${boosterTrack}`
+        : "/import";
   const primaryLabel = hasDue
-    ? "开始今日复习"
+    ? boosterOnly
+      ? "开始第二轮巩固"
+      : "开始今日复习"
     : hasLearning
       ? "开始今日学习"
-      : "导入学习内容";
+      : hasBooster
+        ? "开始第二轮巩固"
+        : "导入学习内容";
 
   if (loading) return <div className="spinner" aria-label="正在加载" />;
 
@@ -165,17 +188,19 @@ export default function TodayPage() {
             />
           </div>
           {visibleTracks.map((track) => {
-            const due =
-              track.calibrationPhrases.length + track.duePhrases.length;
+            const reviewPending = track.reviewPendingIds.length;
             const newCount = track.session
               ? track.learningPhrases.length - track.learningDone
               : track.newPhrases.length;
             const done =
               track.learningDone +
-              (track.calibrationPlan?.status === "completed"
-                ? track.calibrationPlan.phraseIds.length
-                : 0) +
-              (track.plan?.completedPhraseIds.length ?? 0);
+              track.reviewSettledIds.length;
+            const boosterCount = track.boosterPhrases.length;
+            const reviewLabel =
+              track.plan?.kind === "booster" &&
+              track.calibrationPhrases.length === 0
+                ? "待巩固"
+                : "待复习";
             return (
               <div
                 className="track-row"
@@ -186,7 +211,8 @@ export default function TodayPage() {
                 <div>
                   <h3>{TRACKS[track.trackId].label}</h3>
                   <p>
-                    新学 {newCount} · 待复习 {due}
+                    新学 {newCount} · {reviewLabel} {reviewPending}
+                    {boosterCount > 0 ? ` · 可巩固 ${boosterCount}` : ""}
                   </p>
                 </div>
                 <div className="track-count">
@@ -278,16 +304,13 @@ export default function TodayPage() {
 
         <section>
           <div className="section-heading">
-            <h2>今日复习</h2>
+            <h2>{boosterOnly ? "第二轮巩固" : "今日复习"}</h2>
             <span>
               {visibleTracks.reduce(
-                (sum, track) =>
-                  sum +
-                  track.calibrationPhrases.length +
-                  track.duePhrases.length,
+                (sum, track) => sum + track.reviewPendingIds.length,
                 0,
               )}{" "}
-              条到期
+              {boosterOnly ? "条待巩固" : "条到期"}
             </span>
           </div>
           <div className="phrase-list">
@@ -312,19 +335,25 @@ export default function TodayPage() {
                       ? "明天重试"
                       : track.reviewCompletedIds.includes(phrase.id)
                       ? "已完成"
-                      : "待复习"}
+                      : track.plan?.kind === "booster"
+                        ? "待巩固"
+                        : "待复习"}
                   </span>
                 </button>
               )),
             )}
-            {!data.some(
-              (track) =>
-                track.calibrationPhrases.length > 0 ||
-                track.duePhrases.length > 0,
-            ) ? (
+            {!hasDue ? (
               <div className="summary-row">
-                <span>今天没有到期内容</span>
-                <strong>已清空</strong>
+                <span>
+                  {failedTodayCount > 0
+                    ? "今日没有待处理内容"
+                    : "今天没有到期内容"}
+                </span>
+                <strong>
+                  {failedTodayCount > 0
+                    ? "失败项已排到明天"
+                    : "已清空"}
+                </strong>
               </div>
             ) : null}
           </div>
@@ -332,7 +361,7 @@ export default function TodayPage() {
 
         <div className="create-flow">
           <Link href={primaryHref} className="primary-button wide">
-            {hasDue ? (
+            {hasDue || hasBooster ? (
               <RotateCcw size={17} aria-hidden="true" />
             ) : (
               <BookOpen size={17} aria-hidden="true" />

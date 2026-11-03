@@ -14,6 +14,7 @@ import {
   chooseExampleVariant,
   chooseSenseIndex,
   contextExample,
+  secondarySenseIndexes,
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
 import { shuffle } from "@/lib/domain/text";
@@ -37,6 +38,7 @@ import {
 } from "@/lib/data/repositories";
 import { getSettings } from "@/lib/data/settings";
 import { useLocalDay } from "@/lib/hooks/useLocalDay";
+import { usePersistedTrack } from "@/lib/hooks/usePersistedTrack";
 import { useQuestionScroll } from "@/lib/hooks/useQuestionScroll";
 
 type Step = "overview" | "answer" | "feedback" | "done";
@@ -51,7 +53,11 @@ const GATE_LABELS = [
 
 export default function LearnPage() {
   const today = useLocalDay();
-  const [trackId, setTrackId] = useState<TrackId>("fixed");
+  const {
+    trackId,
+    setTrackId,
+    trackReady,
+  } = usePersistedTrack();
   const [session, setSession] = useState<LearningSession | null>(null);
   const [learningCards, setLearningCards] = useState<LearningCard[]>([]);
   const [queue, setQueue] = useState<LearningGateQueueItem[]>([]);
@@ -73,10 +79,10 @@ export default function LearnPage() {
   const [submitting, setSubmitting] = useState(false);
   const [previewBusy, setPreviewBusy] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [completed, setCompleted] = useState(false);
   const [error, setError] = useState("");
   const startedAt = useRef(0);
   const previewSaving = useRef(false);
+  const loadSequence = useRef(0);
   useQuestionScroll(Boolean(question), Boolean(feedback));
 
   const current = queue[0];
@@ -122,13 +128,10 @@ export default function LearnPage() {
         : "phraseChoice";
     } else if ((item.phrase.senses ?? []).length > 1) {
       type = "senseChoice";
-      const pendingSenseIndexes = (item.phrase.senses ?? [])
-        .map((_, index) => index)
-        .filter(
-          (index) =>
-            index > 0 &&
-            !(item.progress.sensePassedIndexes ?? []).includes(index),
-        );
+      const pendingSenseIndexes = secondarySenseIndexes(item.phrase).filter(
+        (index) =>
+          !(item.progress.sensePassedIndexes ?? []).includes(index),
+      );
       senseIndex = chooseSenseIndex(
         item.phrase,
         item.progress,
@@ -161,23 +164,27 @@ export default function LearnPage() {
 
   const loadSession = useCallback(
     async (selectedTrack: TrackId) => {
+      const requestSequence = ++loadSequence.current;
       setLoading(true);
       setError("");
       const currentSession = await getLearningSession(selectedTrack, today);
+      if (requestSequence !== loadSequence.current) return;
       setSession(currentSession ?? null);
       if (!currentSession || currentSession.status === "completed") {
         setQueue([]);
         setLearningCards([]);
         setQuestion(null);
-        setCompleted(currentSession?.status === "completed");
         setStep(currentSession?.status === "completed" ? "done" : "overview");
         setLoading(false);
         return;
       }
 
-      const cards = await getLearningCards(currentSession);
+      const [cards, nextQueue] = await Promise.all([
+        getLearningCards(currentSession),
+        getLearningGateQueue(currentSession),
+      ]);
+      if (requestSequence !== loadSequence.current) return;
       setLearningCards(cards);
-      const nextQueue = await getLearningGateQueue(currentSession);
       setQueue(
         nextQueue.filter((item) =>
           cards.some((card) => card.phrase.id === item.phrase.id),
@@ -201,14 +208,18 @@ export default function LearnPage() {
         !hasGateProgress &&
         previewIncomplete;
       if (!first) {
-        setCompleted(true);
-        setStep("done");
+        setError(
+          "学习进度正在恢复，但没有找到可作答词条。请返回今日后重新进入。",
+        );
+        setStep("answer");
         setQuestion(null);
       } else if (needsOverview) {
         setQuestion(null);
         setStep("overview");
       } else {
-        setQuestion(await buildGateQuestion(first));
+        const nextQuestion = await buildGateQuestion(first);
+        if (requestSequence !== loadSequence.current) return;
+        setQuestion(nextQuestion);
         setStep("answer");
       }
       setAnswer("");
@@ -221,8 +232,8 @@ export default function LearnPage() {
   );
 
   useEffect(() => {
-    void loadSession(trackId);
-  }, [loadSession, trackId]);
+    if (trackReady) void loadSession(trackId);
+  }, [loadSession, trackId, trackReady]);
 
   async function startSession() {
     if (starting) return;
@@ -237,6 +248,9 @@ export default function LearnPage() {
       if (!created) {
         setSession(null);
         setQueue([]);
+        setError(
+          "这条学习线已经没有新的未学短语。可以从今日页进入第二轮巩固。",
+        );
         return;
       }
       await loadSession(trackId);
@@ -307,7 +321,6 @@ export default function LearnPage() {
         question.senseIndex,
       );
       setSession(result.session);
-      setCompleted(result.completed);
       const selectedSense =
         question.type === "senseChoice" &&
         question.senseIndex !== undefined
@@ -340,14 +353,19 @@ export default function LearnPage() {
   }
 
   async function continueLearning() {
-    if (completed) {
+    if (session?.status === "completed") {
       setStep("done");
       return;
     }
     await loadSession(trackId);
   }
 
-  if (loading) return <div className="spinner" aria-label="正在加载" />;
+  if (loading || !trackReady) {
+    return <div className="spinner" aria-label="正在加载" />;
+  }
+
+  const learningFinished =
+    session?.status === "completed" || step === "done";
 
   return (
     <main className="page">
@@ -416,6 +434,7 @@ export default function LearnPage() {
               type="button"
               className="filter-pill"
               aria-pressed={trackId === track.id}
+              disabled={starting || submitting || previewBusy}
               onClick={() => setTrackId(track.id)}
               key={track.id}
             >
@@ -450,17 +469,43 @@ export default function LearnPage() {
               </button>
             </div>
           </div>
-        ) : step === "done" || completed || !current ? (
+        ) : learningFinished ? (
           <div className="empty-state">
             <BookOpen aria-hidden="true" />
             <div>
               <h2>第 0 天学习完成</h2>
               <p>
-                已完成含义、产出、语境和出口测试。明天进行四轮验证，全部通过后进入长期复习。
+                已完成含义、产出、语境和出口测试。明天进行四轮验证；如果这条学习线没有新词，也可以进入第二轮巩固。
               </p>
-              <Link href="/" className="primary-button">
-                返回今日
-              </Link>
+              <div className="create-flow">
+                <Link
+                  href={`/review?booster=1&track=${trackId}`}
+                  className="primary-button wide"
+                >
+                  第二轮巩固
+                </Link>
+                <Link href="/" className="secondary-button wide">
+                  返回今日
+                </Link>
+              </div>
+            </div>
+          </div>
+        ) : !current ? (
+          <div className="empty-state">
+            <BookOpen aria-hidden="true" />
+            <div>
+              <h2>学习状态正在恢复</h2>
+              <p>
+                {error ||
+                  "当前学习会话仍在进行，但没有找到可作答内容。请重新加载。"}
+              </p>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => void loadSession(trackId)}
+              >
+                重新加载
+              </button>
             </div>
           </div>
         ) : (
@@ -612,7 +657,7 @@ export default function LearnPage() {
                     onClick={continueLearning}
                   >
                     {feedback?.correct
-                      ? completed
+                      ? session?.status === "completed"
                         ? "完成第 0 天"
                         : "继续"
                       : "继续，稍后重试"}

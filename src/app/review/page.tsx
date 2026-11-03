@@ -22,6 +22,7 @@ import type {
 } from "@/lib/domain/types";
 import {
   ensureCalibrationPlan,
+  ensureBoosterReviewPlan,
   ensureReviewPlan,
   getCalibrationSummary,
   getDistractors,
@@ -32,6 +33,7 @@ import {
 } from "@/lib/data/repositories";
 import { getSettings } from "@/lib/data/settings";
 import { useLocalDay } from "@/lib/hooks/useLocalDay";
+import { usePersistedTrack } from "@/lib/hooks/usePersistedTrack";
 import { useQuestionScroll } from "@/lib/hooks/useQuestionScroll";
 
 interface FeedbackState {
@@ -47,7 +49,11 @@ interface FeedbackState {
 
 export default function ReviewPage() {
   const today = useLocalDay();
-  const [trackId, setTrackId] = useState<TrackId>("fixed");
+  const {
+    trackId,
+    setTrackId,
+    trackReady,
+  } = usePersistedTrack();
   const [plan, setPlan] = useState<ReviewPlan | null>(null);
   const [calibrationPlan, setCalibrationPlan] =
     useState<CalibrationPlan | null>(null);
@@ -64,25 +70,37 @@ export default function ReviewPage() {
   const [doneCount, setDoneCount] = useState(0);
   const [answered, setAnswered] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [boosterRequested, setBoosterRequested] = useState(false);
   const [error, setError] = useState("");
   const startTime = useRef(0);
+  const loadSequence = useRef(0);
+  const activeTrack = useRef(trackId);
   useQuestionScroll(Boolean(question), Boolean(feedback));
+
+  useEffect(() => {
+    activeTrack.current = trackId;
+  }, [trackId]);
 
   const loadReady = useCallback(
     async (selectedTrack: TrackId) => {
+      const requestSequence = ++loadSequence.current;
       setLoading(true);
+      setPreparing(false);
       const nextCalibration = await ensureCalibrationPlan(
         selectedTrack,
         today,
         getSettings(),
       );
+      if (requestSequence !== loadSequence.current) return;
       setCalibrationPlan(nextCalibration);
-      setCalibrationSummary(
+      const nextSummary =
         nextCalibration.status === "completed" &&
           nextCalibration.phraseIds.length > 0
           ? await getCalibrationSummary(nextCalibration)
-          : { S: 0, A: 0, B: 0, C: 0, D: 0, failed: 0 },
-      );
+          : { S: 0, A: 0, B: 0, C: 0, D: 0, failed: 0 };
+      if (requestSequence !== loadSequence.current) return;
+      setCalibrationSummary(nextSummary);
       if (
         nextCalibration.status === "active" &&
         nextCalibration.phraseIds.length > 0
@@ -94,11 +112,16 @@ export default function ReviewPage() {
         setLoading(false);
         return;
       }
-      const nextPlan = await ensureReviewPlan(
-        selectedTrack,
-        today,
-        getSettings(),
-      );
+      const wantsBooster =
+        new URLSearchParams(window.location.search).get("booster") === "1";
+      const nextPlan = wantsBooster
+        ? await ensureBoosterReviewPlan(
+            selectedTrack,
+            today,
+            getSettings(),
+          )
+        : await ensureReviewPlan(selectedTrack, today, getSettings());
+      if (requestSequence !== loadSequence.current) return;
       setPlan(nextPlan);
       setDoneCount(nextPlan.completedPhraseIds.length);
       setStarted(false);
@@ -110,69 +133,124 @@ export default function ReviewPage() {
   );
 
   useEffect(() => {
-    void loadReady(trackId);
-  }, [loadReady, trackId]);
+    setBoosterRequested(
+      new URLSearchParams(window.location.search).get("booster") === "1",
+    );
+  }, []);
+
+  useEffect(() => {
+    if (trackReady) void loadReady(trackId);
+  }, [loadReady, trackId, trackReady]);
 
   const prepareCurrent = useCallback(async () => {
-    const currentPlan = await ensureReviewPlan(trackId, today, getSettings());
-    const queue = await getReviewQueue(currentPlan);
-    if (queue.length === 0) {
-      setPlan(currentPlan);
-      setDoneCount(currentPlan.completedPhraseIds.length);
-      setQuestion(null);
-      setCurrentPhraseId(null);
-      return;
-    }
+    const requestSequence = ++loadSequence.current;
+    const requestedTrack = trackId;
+    setPreparing(true);
+    setError("");
+    try {
+      const currentPlan = await ensureReviewPlan(
+        requestedTrack,
+        today,
+        getSettings(),
+      );
+      if (
+        requestSequence !== loadSequence.current ||
+        activeTrack.current !== requestedTrack
+      ) {
+        return;
+      }
+      const queue = await getReviewQueue(currentPlan);
+      if (
+        requestSequence !== loadSequence.current ||
+        activeTrack.current !== requestedTrack
+      ) {
+        return;
+      }
+      if (queue.length === 0 || currentPlan.status === "completed") {
+        setPlan(currentPlan);
+        setDoneCount(currentPlan.completedPhraseIds.length);
+        setQuestion(null);
+        setCurrentPhraseId(null);
+        setStarted(false);
+        return;
+      }
 
-    const item = queue[0];
-    let latestPlan = currentPlan;
-    if (!latestPlan.attempts[item.phrase.id]) {
-      latestPlan = await startReviewAttempt(latestPlan.id, item.phrase.id);
-    }
-    const attempt = latestPlan.attempts[item.phrase.id];
-    const nextType = attempt.types[attempt.answers.length];
-    if (!nextType) {
-      setPlan(latestPlan);
-      setQuestion(null);
-      setCurrentPhraseId(item.phrase.id);
-      return;
-    }
-    const senseIndex =
-      nextType === "senseChoice"
-        ? chooseSenseIndex(item.phrase, item.progress)
+      const item = queue[0];
+      let latestPlan = currentPlan;
+      if (!latestPlan.attempts[item.phrase.id]) {
+        latestPlan = await startReviewAttempt(latestPlan.id, item.phrase.id);
+      }
+      if (
+        requestSequence !== loadSequence.current ||
+        activeTrack.current !== requestedTrack
+      ) {
+        return;
+      }
+      const attempt = latestPlan.attempts[item.phrase.id];
+      const nextType = attempt.types[attempt.answers.length];
+      if (!nextType) {
+        setPlan(latestPlan);
+        setQuestion(null);
+        setCurrentPhraseId(item.phrase.id);
+        return;
+      }
+      const senseIndex =
+        nextType === "senseChoice"
+          ? chooseSenseIndex(item.phrase, item.progress)
+          : undefined;
+      const distractors =
+        nextType === "senseChoice"
+          ? await getMeaningDistractors(item.phrase, 3)
+          : ["cloze", "contextChoice", "phraseChoice"].includes(nextType)
+            ? await getDistractors(item.phrase, 3)
+            : [];
+      const variantIndex = ["cloze", "contextChoice"].includes(nextType)
+        ? chooseExampleVariant(item.phrase, item.progress)
         : undefined;
-    const distractors =
-      nextType === "senseChoice"
-        ? await getMeaningDistractors(item.phrase, 3)
-        : ["cloze", "contextChoice", "phraseChoice"].includes(nextType)
-          ? await getDistractors(item.phrase, 3)
-          : [];
-    const variantIndex = ["cloze", "contextChoice"].includes(nextType)
-      ? chooseExampleVariant(item.phrase, item.progress)
-      : undefined;
-    const nextQuestion = buildQuestion(
-      nextType,
-      item.phrase,
-      distractors,
-      variantIndex,
-      senseIndex,
-    );
-    if (nextQuestion.options) {
-      nextQuestion.options = shuffle(nextQuestion.options);
-    }
+      const nextQuestion = buildQuestion(
+        nextType,
+        item.phrase,
+        distractors,
+        variantIndex,
+        senseIndex,
+      );
+      if (
+        requestSequence !== loadSequence.current ||
+        activeTrack.current !== requestedTrack
+      ) {
+        return;
+      }
+      if (nextQuestion.options) {
+        nextQuestion.options = shuffle(nextQuestion.options);
+      }
 
-    setPlan(latestPlan);
-    setCurrentPhraseId(item.phrase.id);
-    setQuestion(nextQuestion);
-    setInput("");
-    setSelected("");
-    setFeedback(null);
-    setAnswered(false);
-    setDoneCount(latestPlan.completedPhraseIds.length);
-    startTime.current = Date.now();
+      setPlan(latestPlan);
+      setCurrentPhraseId(item.phrase.id);
+      setQuestion(nextQuestion);
+      setInput("");
+      setSelected("");
+      setFeedback(null);
+      setAnswered(false);
+      setDoneCount(latestPlan.completedPhraseIds.length);
+      startTime.current = Date.now();
+    } catch (caught) {
+      if (
+        requestSequence === loadSequence.current &&
+        activeTrack.current === requestedTrack
+      ) {
+        setError(
+          caught instanceof Error ? caught.message : "复习题目准备失败",
+        );
+      }
+    } finally {
+      if (requestSequence === loadSequence.current) {
+        setPreparing(false);
+      }
+    }
   }, [today, trackId]);
 
   async function beginReview() {
+    if (preparing) return;
     setStarted(true);
     await prepareCurrent();
   }
@@ -247,18 +325,13 @@ export default function ReviewPage() {
   }
 
   async function continueReview() {
-    const latest = await ensureReviewPlan(trackId, today, getSettings());
-    setPlan(latest);
-    setDoneCount(latest.completedPhraseIds.length);
-    if (latest.status === "completed") {
-      setStarted(false);
-      setQuestion(null);
-      return;
-    }
+    if (preparing) return;
     await prepareCurrent();
   }
 
-  if (loading) return <div className="spinner" aria-label="正在加载" />;
+  if (loading || !trackReady) {
+    return <div className="spinner" aria-label="正在加载" />;
+  }
 
   if (
     calibrationPlan?.status === "active" &&
@@ -294,8 +367,13 @@ export default function ReviewPage() {
           <span className="meta">
             {TRACKS[trackId].label} ·{" "}
             {total > 0
-              ? `复习 ${Math.min(doneCount + 1, total)} / ${total}`
-              : "暂无到期"}
+              ? `${plan?.kind === "booster" ? "巩固" : "复习"} ${Math.min(
+                  doneCount + 1,
+                  total,
+                )} / ${total}`
+              : boosterRequested
+                ? "暂无可巩固内容"
+                : "暂无到期"}
           </span>
         </div>
         <div
@@ -325,6 +403,7 @@ export default function ReviewPage() {
               type="button"
               className="filter-pill"
               aria-pressed={trackId === track.id}
+                disabled={submitting || preparing}
               onClick={() => {
                 setTrackId(track.id);
               }}
@@ -348,6 +427,8 @@ export default function ReviewPage() {
               <h2>
                 {calibrationCompletedToday
                   ? "今日四轮验证完成"
+                  : boosterRequested
+                    ? "暂无可巩固内容"
                   : "今天没有到期内容"}
               </h2>
               {calibrationCompletedToday ? (
@@ -372,7 +453,9 @@ export default function ReviewPage() {
                 </>
               ) : (
                 <p>
-                  新学的短语会在明天进入校准，长期复习也会按本地日期自动出现。
+                  {boosterRequested
+                    ? "当前还有未学新词、未完成学习或到期复习时，会优先处理它们；全部完成后再进入第二轮巩固。"
+                    : "新学的短语会在明天进入校准，长期复习也会按本地日期自动出现。"}
                 </p>
               )}
               <Link href="/" className="secondary-button">
@@ -384,17 +467,28 @@ export default function ReviewPage() {
           <div className="empty-state">
             <RotateCcw aria-hidden="true" />
             <div>
-              <h2>{plan?.status === "completed" ? "今日复习完成" : "今日复习"}</h2>
+              <h2>
+                {plan?.status === "completed"
+                  ? plan.kind === "booster"
+                    ? "第二轮巩固完成"
+                    : "今日复习完成"
+                  : plan?.kind === "booster"
+                    ? "第二轮巩固"
+                    : "今日复习"}
+              </h2>
               <p>
-                共 {total} 条。每张卡会抽取两种不同题型，首次作答和纠错结果分别记录。
+                {plan?.kind === "booster"
+                  ? `共 ${total} 条第二轮巩固。练习记录会保留，但不会改变正式复习日期。`
+                  : `共 ${total} 条。每张卡会抽取两种不同题型，首次作答和纠错结果分别记录。`}
               </p>
               {plan?.status !== "completed" ? (
                 <button
                   type="button"
                   className="primary-button"
                   onClick={beginReview}
+                  disabled={preparing}
                 >
-                  开始复习
+                  {plan?.kind === "booster" ? "开始巩固" : "开始复习"}
                   <ArrowRight size={17} aria-hidden="true" />
                 </button>
               ) : (
@@ -525,6 +619,7 @@ export default function ReviewPage() {
                   type="button"
                   className="primary-button wide"
                   onClick={continueReview}
+                  disabled={preparing}
                 >
                   继续
                 </button>
@@ -533,7 +628,9 @@ export default function ReviewPage() {
                   type="button"
                   className="primary-button wide"
                   disabled={
-                    submitting || (question.options ? !selected : !input.trim())
+                    submitting ||
+                    preparing ||
+                    (question.options ? !selected : !input.trim())
                   }
                   onClick={submitAnswer}
                 >

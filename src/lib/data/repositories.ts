@@ -13,6 +13,10 @@ import {
   selectNewPhrases,
 } from "@/lib/domain/learning-flow";
 import {
+  selectBoosterCandidates,
+  type BoosterCandidate,
+} from "@/lib/domain/booster-selection";
+import {
   meaningRecallRequirement,
   previewRecognitionRequirement,
 } from "@/lib/domain/learning-policy";
@@ -26,6 +30,7 @@ import {
   buildReviewAttemptTypes,
   canUseContextChoice,
   chooseSenseIndex,
+  secondarySenseIndexes,
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
 import {
@@ -43,8 +48,9 @@ import {
 } from "@/lib/domain/text";
 import type {
   AppSettings,
-  CalibrationResult,
   CalibrationPlan,
+  CalibrationResult,
+  CalibrationRoundResult,
   CardProgress,
   Day0Signal,
   Day0GateName,
@@ -83,6 +89,9 @@ export interface TrackTodayData {
   reviewPhrases: Phrase[];
   reviewCompletedIds: string[];
   reviewFailedIds: string[];
+  reviewSettledIds: string[];
+  reviewPendingIds: string[];
+  boosterPhrases: Phrase[];
   completedPhrases: Phrase[];
   deferredCount: number;
 }
@@ -145,6 +154,35 @@ function phraseMap(phrases: readonly Phrase[]): Map<string, Phrase> {
   return new Map(phrases.map((phrase) => [phrase.id, phrase]));
 }
 
+function hasBlockingFormalWorkSnapshot(
+  states: readonly ReviewState[],
+  progresses: readonly CardProgress[],
+  plans: readonly ReviewPlan[],
+  calibrationPlans: readonly CalibrationPlan[],
+  today: string,
+): boolean {
+  const dueReview = states.some((item) =>
+    isDue(item.nextReviewOn, today),
+  );
+  const dueCalibration = progresses.some(
+    (item) =>
+      item.state === "incubating" &&
+      item.calibrationDueOn &&
+      isDue(item.calibrationDueOn, today),
+  );
+  const activeCalibration = calibrationPlans.some(
+    (plan) =>
+      plan.status === "active" &&
+      plan.phraseIds.length > 0,
+  );
+  const activeFormalPlan = plans.some(
+    (plan) =>
+      plan.kind !== "booster" &&
+      (plan.status === "active" || plan.deferredPhraseIds.length > 0),
+  );
+  return dueReview || dueCalibration || activeCalibration || activeFormalPlan;
+}
+
 export async function getTodayData(
   settings: AppSettings = getSettings(),
   today = localDateKey(),
@@ -161,6 +199,13 @@ export async function getTodayData(
   const progressMap = new Map(progresses.map((item) => [item.phraseId, item]));
   const phraseById = phraseMap(phrases);
   const activePhrases = phrases.filter((item) => !item.archived);
+  const hasBlockingFormalWork = hasBlockingFormalWorkSnapshot(
+    states,
+    progresses,
+    plans,
+    calibrationPlans,
+    today,
+  );
   const dueWorkload =
     states.filter((item) => isDue(item.nextReviewOn, today)).length +
     progresses.filter(
@@ -190,10 +235,16 @@ export async function getTodayData(
           .filter((item): item is Phrase => Boolean(item))
       : [];
     const learningDone = learningPhrases.filter(
-      (phrase) => progressMap.get(phrase.id)?.state !== "day0",
+      (phrase) => {
+        const progress = progressMap.get(phrase.id);
+        return Boolean(progress && progress.state !== "day0");
+      },
     ).length;
     const learningCompletedIds = learningPhrases
-      .filter((phrase) => progressMap.get(phrase.id)?.state !== "day0")
+      .filter((phrase) => {
+        const progress = progressMap.get(phrase.id);
+        return Boolean(progress && progress.state !== "day0");
+      })
       .map((phrase) => phrase.id);
 
     const unlearned = trackPhrases.filter((phrase) => !progressMap.has(phrase.id));
@@ -256,6 +307,59 @@ export async function getTodayData(
       ...(plan?.completedPhraseIds ?? []),
     ]);
     const reviewFailedIds = unique(calibrationPlan?.failedIds ?? []);
+    const reviewSettledIds = unique([
+      ...reviewCompletedIds,
+      ...reviewFailedIds,
+    ]);
+    const reviewPendingIds = unique(
+      combinedReviewIds.filter(
+        (id) =>
+          !reviewSettledIds.includes(id),
+      ),
+    );
+    const canOfferBooster =
+      (!session || session.status === "completed") &&
+      unlearned.length === 0 &&
+      newPhrases.length === 0 &&
+      calibrationPhrases.length === 0 &&
+      duePhrases.length === 0 &&
+      (!plan || plan.phraseIds.length === 0) &&
+      !hasBlockingFormalWork;
+    const reviewStateById = new Map(
+      states
+        .filter((item) => item.trackId === trackId)
+        .map((item) => [item.phraseId, item]),
+    );
+    const boosterCandidates: BoosterCandidate[] = progresses
+      .filter(
+        (item) =>
+          item.trackId === trackId &&
+          item.state !== "day0" &&
+          Boolean(phraseById.get(item.phraseId)) &&
+          !phraseById.get(item.phraseId)?.archived,
+      )
+      .map((item) => {
+        const state = reviewStateById.get(item.phraseId);
+        return {
+          phraseId: item.phraseId,
+          grade: item.confirmedGrade ?? state?.grade,
+          provisionalGrade: item.provisionalGrade,
+          day0Rating: item.day0Rating,
+          mistakeCount: state?.mistakeCount ?? 0,
+          lapses: state?.lapses ?? 0,
+          lastReviewAt: state?.lastReviewAt,
+          lastBoosterAt: item.lastBoosterAt,
+        };
+      });
+    const boosterPhrases = canOfferBooster
+      ? selectBoosterCandidates(
+          boosterCandidates,
+          trackLimit,
+          `${today}:${trackId}:booster-preview`,
+        )
+          .map((id) => phraseById.get(id))
+          .filter((item): item is Phrase => Boolean(item))
+      : [];
 
     return {
       trackId,
@@ -271,6 +375,9 @@ export async function getTodayData(
       reviewPhrases,
       reviewCompletedIds,
       reviewFailedIds,
+      reviewSettledIds,
+      reviewPendingIds,
+      boosterPhrases,
       completedPhrases,
       deferredCount: plan?.deferredPhraseIds.length ?? 0,
     };
@@ -582,15 +689,27 @@ export async function recordLearningGateAnswer(
         };
       }
       const current = progress.day0Gates?.[gate];
+      const availableSenseIndexes = secondarySenseIndexes(phrase);
       const senseGate =
         gate === "exit" &&
         questionType === "senseChoice" &&
-        senseIndex !== undefined;
+        senseIndex !== undefined &&
+        availableSenseIndexes.includes(senseIndex);
+      if (
+        gate === "exit" &&
+        questionType === "senseChoice" &&
+        !senseGate
+      ) {
+        throw new Error("Invalid secondary sense for exit gate");
+      }
+      const validSensePassedIndexes = (
+        progress.sensePassedIndexes ?? []
+      ).filter((index) => availableSenseIndexes.includes(index));
       const sensePassedIndexes = senseGate && correct
-        ? unique([...(progress.sensePassedIndexes ?? []), senseIndex])
-        : progress.sensePassedIndexes ?? [];
+        ? unique([...validSensePassedIndexes, senseIndex])
+        : validSensePassedIndexes;
       const requiredCorrect = senseGate
-        ? Math.max(0, (phrase.senses?.length ?? 1) - 1)
+        ? availableSenseIndexes.length
         : questionType === "spelling"
           ? 3
           : gate === "meaning" && questionType === "meaning"
@@ -865,6 +984,7 @@ export async function ensureReviewPlan(
         id,
         date: today,
         trackId,
+        kind: "scheduled",
         phraseIds: allIds,
         calibrationIds: [],
         deferredPhraseIds: allCandidateIds.filter(
@@ -890,11 +1010,192 @@ export async function ensureReviewPlan(
   );
 }
 
+export async function ensureBoosterReviewPlan(
+  trackId: TrackId,
+  today = localDateKey(),
+  settings: AppSettings = getSettings(),
+): Promise<ReviewPlan> {
+  const scheduledPlan = await ensureReviewPlan(trackId, today, settings);
+  if (scheduledPlan.phraseIds.length > 0) return scheduledPlan;
+
+  return db.transaction(
+    "rw",
+    [
+      db.reviewPlans,
+      db.cardProgress,
+      db.reviewStates,
+      db.phrases,
+      db.learningSessions,
+      db.calibrationPlans,
+    ],
+    async () => {
+      const existing = await db.reviewPlans.get(scheduledPlan.id);
+      if (!existing || existing.phraseIds.length > 0) {
+        return existing ?? scheduledPlan;
+      }
+
+      const [
+        sessions,
+        calibrationPlans,
+        allProgresses,
+        allStates,
+        phrases,
+        allPlans,
+      ] =
+        await Promise.all([
+          db.learningSessions.where("date").equals(today).toArray(),
+          db.calibrationPlans.where("date").equals(today).toArray(),
+          db.cardProgress.toArray(),
+          db.reviewStates.toArray(),
+          db.phrases.where("trackId").equals(trackId).toArray(),
+          db.reviewPlans.toArray(),
+        ]);
+      const progresses = allProgresses.filter(
+        (item) => item.trackId === trackId,
+      );
+      const states = allStates.filter(
+        (item) => item.trackId === trackId,
+      );
+      const trackPlans = allPlans.filter(
+        (plan) => plan.trackId === trackId,
+      );
+      const todayPlans = allPlans.filter(
+        (plan) => plan.date === today,
+      );
+      const staleBoosters = trackPlans.filter(
+        (plan) =>
+          plan.kind === "booster" &&
+          plan.status === "active" &&
+          plan.date < today,
+      );
+      if (staleBoosters.length > 0) {
+        const now = Date.now();
+        await db.reviewPlans.bulkPut(
+          staleBoosters.map((plan) => ({
+            ...plan,
+            status: "completed" as const,
+            updatedAt: now,
+            completedAt: now,
+          })),
+        );
+      }
+      if (
+        sessions.some(
+          (session) =>
+            session.trackId === trackId && session.status === "active",
+        ) ||
+        calibrationPlans.some(
+          (plan) =>
+            plan.trackId === trackId &&
+            plan.status === "active" &&
+            plan.phraseIds.length > 0,
+        ) ||
+        hasBlockingFormalWorkSnapshot(
+          allStates,
+          allProgresses,
+          todayPlans,
+          calibrationPlans,
+          today,
+        )
+      ) {
+        return existing;
+      }
+
+      const phraseById = phraseMap(phrases);
+      const progressIds = new Set(
+        progresses.map((progress) => progress.phraseId),
+      );
+      if (
+        phrases.some(
+          (phrase) => !phrase.archived && !progressIds.has(phrase.id),
+        )
+      ) {
+        return existing;
+      }
+      const stateById = new Map(states.map((item) => [item.phraseId, item]));
+      const dueIds = new Set(
+        progresses
+          .filter(
+            (item) =>
+              (item.state === "incubating" &&
+                item.calibrationDueOn &&
+                isDue(item.calibrationDueOn, today)) ||
+              (stateById.get(item.phraseId) &&
+                isDue(
+                  stateById.get(item.phraseId)!.nextReviewOn,
+                  today,
+                )),
+          )
+          .map((item) => item.phraseId),
+      );
+      const candidates: BoosterCandidate[] = progresses
+        .filter(
+          (item) =>
+            item.state !== "day0" &&
+            !dueIds.has(item.phraseId) &&
+            Boolean(phraseById.get(item.phraseId)) &&
+            !phraseById.get(item.phraseId)?.archived,
+        )
+        .map((item) => {
+          const state = stateById.get(item.phraseId);
+          return {
+            phraseId: item.phraseId,
+            grade: item.confirmedGrade ?? state?.grade,
+            provisionalGrade: item.provisionalGrade,
+            day0Rating: item.day0Rating,
+            mistakeCount: state?.mistakeCount ?? 0,
+            lapses: state?.lapses ?? 0,
+            lastReviewAt: state?.lastReviewAt,
+            lastBoosterAt: item.lastBoosterAt,
+          };
+        });
+      const trackLimit =
+        trackId === "fixed" ? settings.fixedNewLimit : settings.verbNewLimit;
+      const selectedIds = selectBoosterCandidates(
+        candidates,
+        trackLimit,
+        `${today}:${trackId}:booster`,
+      );
+      if (selectedIds.length === 0) return existing;
+
+      const nextPlan: ReviewPlan = {
+        ...existing,
+        kind: "booster",
+        phraseIds: selectedIds,
+        calibrationIds: [],
+        deferredPhraseIds: [],
+        completedPhraseIds: [],
+        attempts: {},
+        status: "active",
+        updatedAt: Date.now(),
+        completedAt: undefined,
+      };
+      await db.reviewPlans.put(nextPlan);
+      return nextPlan;
+    },
+  );
+}
+
 export interface CalibrationQueueItem {
   phrase: Phrase;
   progress: CardProgress;
   questionType: QuestionType;
   senseIndex?: number;
+}
+
+function normalizeCalibrationPlan(plan: CalibrationPlan): CalibrationPlan {
+  return {
+    ...plan,
+    currentRound: plan.currentRound ?? 1,
+    roundPassedIds: {
+      "1": plan.roundPassedIds?.["1"] ?? [],
+      "2": plan.roundPassedIds?.["2"] ?? [],
+      "3": plan.roundPassedIds?.["3"] ?? [],
+      "4": plan.roundPassedIds?.["4"] ?? [],
+    },
+    failedIds: plan.failedIds ?? [],
+    results: plan.results ?? {},
+  };
 }
 
 export async function ensureCalibrationPlan(
@@ -915,7 +1216,34 @@ export async function ensureCalibrationPlan(
     ],
     async () => {
       const existing = await db.calibrationPlans.get(id);
-      if (existing) return existing;
+      if (existing) {
+        const normalized = normalizeCalibrationPlan(existing);
+        if (normalized.currentRound === 3) {
+          const existingPhrases = await db.phrases.bulkGet(
+            normalized.roundPassedIds["3"],
+          );
+          const reopenedIds = new Set(
+            existingPhrases
+              .filter(
+                (phrase): phrase is Phrase => {
+                  if (!phrase) return false;
+                  return (
+                    secondarySenseIndexes(phrase).length > 0 &&
+                    !normalized.results[phrase.id]?.["3"]?.senses
+                  );
+                },
+              )
+              .map((phrase) => phrase.id),
+          );
+          if (reopenedIds.size > 0) {
+            normalized.roundPassedIds["3"] = normalized.roundPassedIds[
+              "3"
+            ].filter((phraseId) => !reopenedIds.has(phraseId));
+            await db.calibrationPlans.put(normalized);
+          }
+        }
+        return normalized;
+      }
 
       const [progresses, phrases, reviewPlans, calibrationPlans] =
         await Promise.all([
@@ -980,8 +1308,9 @@ export async function ensureCalibrationPlan(
 }
 
 export async function getCalibrationQueue(
-  plan: CalibrationPlan,
+  inputPlan: CalibrationPlan,
 ): Promise<CalibrationQueueItem[]> {
+  const plan = normalizeCalibrationPlan(inputPlan);
   if (plan.status === "completed") return [];
   const roundKey = String(plan.currentRound) as "1" | "2" | "3" | "4";
   const pendingIds = plan.phraseIds.filter(
@@ -1010,9 +1339,18 @@ export async function getCalibrationQueue(
     const progress = progressById.get(id);
     if (!phrase || !progress) continue;
     const preferred = CALIBRATION_QUESTION_ORDER[plan.currentRound - 1];
+    const availableSenseIndexes = secondarySenseIndexes(phrase);
+    const passedSenseIndexes = Object.entries(
+      plan.results[id]?.[roundKey]?.senses ?? {},
+    )
+      .filter(([, result]) => result.finalCorrect)
+      .map(([index]) => Number(index));
+    const pendingSenseIndexes = availableSenseIndexes.filter(
+      (index) => !passedSenseIndexes.includes(index),
+    );
     const questionType =
       preferred === "contextChoice" &&
-      (phrase.senses?.length ?? 0) > 1
+      pendingSenseIndexes.length > 0
         ? "senseChoice"
         : preferred === "contextChoice" &&
             !canUseContextChoice(phrase)
@@ -1024,7 +1362,7 @@ export async function getCalibrationQueue(
       questionType,
       senseIndex:
         questionType === "senseChoice"
-          ? chooseSenseIndex(phrase, progress)
+          ? chooseSenseIndex(phrase, progress, pendingSenseIndexes)
           : undefined,
     });
   }
@@ -1057,7 +1395,15 @@ export async function recordCalibrationAnswer(
   responseTimeMs: number,
   exampleVariant?: number,
   senseIndex?: number,
-): Promise<{ plan: CalibrationPlan; failed: boolean }> {
+): Promise<{
+  plan: CalibrationPlan;
+  failed: boolean;
+  passed: boolean;
+  requiredCorrect: number;
+  correctStreak: number;
+  correctCount: number;
+  failureStreak: number;
+}> {
   return db.transaction(
     "rw",
     [
@@ -1065,58 +1411,157 @@ export async function recordCalibrationAnswer(
       db.reviewLogs,
       db.cardProgress,
       db.reviewStates,
+      db.phrases,
     ],
     async () => {
-      const plan = await db.calibrationPlans.get(planId);
-      if (!plan) throw new Error("Calibration plan not found");
+      const storedPlan = await db.calibrationPlans.get(planId);
+      if (!storedPlan) throw new Error("Calibration plan not found");
+      const plan = normalizeCalibrationPlan(storedPlan);
       if (plan.status === "completed" || plan.failedIds.includes(phraseId)) {
-        return { plan, failed: plan.failedIds.includes(phraseId) };
+        return {
+          plan,
+          failed: plan.failedIds.includes(phraseId),
+          passed: false,
+          requiredCorrect: 0,
+          correctStreak: 0,
+          correctCount: 0,
+          failureStreak: 0,
+        };
       }
 
       const roundKey = String(plan.currentRound) as "1" | "2" | "3" | "4";
       if (plan.roundPassedIds[roundKey].includes(phraseId)) {
-        return { plan, failed: false };
+        return {
+          plan,
+          failed: false,
+          passed: true,
+          requiredCorrect: 1,
+          correctStreak: 1,
+          correctCount: 1,
+          failureStreak: 0,
+        };
       }
       const phraseResults = plan.results[phraseId] ?? {};
       const current = phraseResults[roundKey];
       const attemptAt = Date.now();
       const cardProgress = await db.cardProgress.get(phraseId);
-      const requiredCorrect =
-        questionType === "spelling"
-          ? 3
-          : questionType === "meaning"
-            ? meaningRecallRequirement(cardProgress?.day0Rating)
-            : 1;
-      const correctStreak = correct
-        ? (current?.correctStreak ?? 0) + 1
-        : 0;
-      const correctCount =
-        questionType === "spelling"
-          ? (current?.correctCount ?? 0) + (correct ? 1 : 0)
-          : correct
-            ? 1
-            : 0;
+      const phrase = await db.phrases.get(phraseId);
+      if (!cardProgress || !phrase) {
+        throw new Error("Calibration card not found");
+      }
+      const availableSenseIndexes = secondarySenseIndexes(phrase);
+      const isSenseChoice =
+        roundKey === "3" && questionType === "senseChoice";
+      if (
+        isSenseChoice &&
+        (senseIndex === undefined ||
+          !availableSenseIndexes.includes(senseIndex))
+      ) {
+        throw new Error("Invalid secondary sense for calibration");
+      }
+      const previousSenseResult =
+        isSenseChoice && senseIndex !== undefined
+          ? current?.senses?.[String(senseIndex)]
+          : undefined;
+      if (previousSenseResult?.finalCorrect) {
+        return {
+          plan,
+          failed: false,
+          passed: false,
+          requiredCorrect: availableSenseIndexes.length,
+          correctStreak: Object.values(current?.senses ?? {}).filter(
+            (item) => item.finalCorrect,
+          ).length,
+          correctCount: Object.values(current?.senses ?? {}).filter(
+            (item) => item.finalCorrect,
+          ).length,
+          failureStreak: current?.failureStreak ?? 0,
+        };
+      }
+      const previousFailureStreak = current?.failureStreak ?? 0;
+      const failureStreak = correct ? 0 : previousFailureStreak + 1;
       const incorrectAttempts =
         (current?.incorrectAttempts ?? 0) + (correct ? 0 : 1);
-      const nextResult = current
-        ? {
-            ...current,
-            finalCorrect: current.finalCorrect || correct,
-            correctStreak,
-            correctCount,
-            incorrectAttempts,
-            attempts: current.attempts + 1,
-            lastAttemptAt: attemptAt,
-          }
-        : {
-            firstCorrect: correct,
-            finalCorrect: correct,
-            correctStreak,
-            correctCount,
-            incorrectAttempts,
-            attempts: 1,
-            lastAttemptAt: attemptAt,
-          };
+      let nextResult: CalibrationRoundResult;
+      let requiredCorrect: number;
+      let correctStreak: number;
+      let correctCount: number;
+
+      if (isSenseChoice && senseIndex !== undefined) {
+        const senseKey = String(senseIndex);
+        const senseResults = { ...(current?.senses ?? {}) };
+        const previousSense = senseResults[senseKey];
+        const senseCorrectStreak = correct
+          ? (previousSense?.correctStreak ?? 0) + 1
+          : 0;
+        const senseCorrectCount =
+          (previousSense?.correctCount ?? 0) + (correct ? 1 : 0);
+        senseResults[senseKey] = {
+          firstCorrect: previousSense?.firstCorrect ?? correct,
+          finalCorrect: correct,
+          correctStreak: senseCorrectStreak,
+          correctCount: senseCorrectCount,
+          incorrectAttempts:
+            (previousSense?.incorrectAttempts ?? 0) + (correct ? 0 : 1),
+          attempts: (previousSense?.attempts ?? 0) + 1,
+          lastAttemptAt: attemptAt,
+        };
+        const completedSenses = availableSenseIndexes
+          .map((index) => senseResults[String(index)])
+          .filter((item) => Boolean(item));
+        const passedSenses = completedSenses.filter(
+          (item) => item.finalCorrect,
+        ).length;
+        const allSensesPresent =
+          completedSenses.length === availableSenseIndexes.length;
+        const firstCorrect =
+          allSensesPresent &&
+          completedSenses.every((item) => item.firstCorrect);
+        const finalCorrect =
+          allSensesPresent &&
+          completedSenses.every((item) => item.finalCorrect);
+        requiredCorrect = availableSenseIndexes.length;
+        correctStreak = passedSenses;
+        correctCount = passedSenses;
+        nextResult = {
+          firstCorrect,
+          finalCorrect,
+          correctStreak,
+          correctCount,
+          incorrectAttempts,
+          failureStreak,
+          attempts: (current?.attempts ?? 0) + 1,
+          lastAttemptAt: attemptAt,
+          senses: senseResults,
+        };
+      } else {
+        requiredCorrect =
+          questionType === "spelling"
+            ? 3
+            : questionType === "meaning"
+              ? meaningRecallRequirement(cardProgress.day0Rating)
+              : 1;
+        correctStreak = correct
+          ? (current?.correctStreak ?? 0) + 1
+          : 0;
+        correctCount =
+          questionType === "spelling"
+            ? (current?.correctCount ?? 0) + (correct ? 1 : 0)
+            : correct
+              ? 1
+              : 0;
+        nextResult = {
+          firstCorrect: current?.firstCorrect ?? correct,
+          finalCorrect: (current?.finalCorrect ?? false) || correct,
+          correctStreak,
+          correctCount,
+          incorrectAttempts,
+          failureStreak,
+          attempts: (current?.attempts ?? 0) + 1,
+          lastAttemptAt: attemptAt,
+          ...(current?.senses ? { senses: current.senses } : {}),
+        };
+      }
       phraseResults[roundKey] = nextResult;
       plan.results[phraseId] = phraseResults;
 
@@ -1150,21 +1595,18 @@ export async function recordCalibrationAnswer(
         }
       }
 
-      let failed = false;
-      if (
-        (questionType === "spelling"
+      const passed = isSenseChoice
+        ? nextResult.finalCorrect
+        : questionType === "spelling"
           ? correctCount >= requiredCorrect
-          : correct && correctStreak >= requiredCorrect)
-      ) {
+          : correct && correctStreak >= requiredCorrect;
+      let failed = false;
+      if (passed) {
         plan.roundPassedIds[roundKey] = unique([
           ...plan.roundPassedIds[roundKey],
           phraseId,
         ]);
-      } else if (
-        (questionType === "spelling"
-          ? incorrectAttempts >= 3
-          : nextResult.attempts >= 3)
-      ) {
+      } else if (failureStreak >= 3) {
         failed = true;
         plan.failedIds = unique([...plan.failedIds, phraseId]);
         const progress = await db.cardProgress.get(phraseId);
@@ -1198,7 +1640,15 @@ export async function recordCalibrationAnswer(
 
       plan.updatedAt = Date.now();
       await db.calibrationPlans.put(plan);
-      return { plan, failed };
+      return {
+        plan,
+        failed,
+        passed,
+        requiredCorrect,
+        correctStreak,
+        correctCount,
+        failureStreak,
+      };
     },
   );
 }
@@ -1207,7 +1657,10 @@ export async function getCalibrationPlan(
   trackId: TrackId,
   today = localDateKey(),
 ): Promise<CalibrationPlan | undefined> {
-  return db.calibrationPlans.get(`calibration:${today}:${trackId}`);
+  const plan = await db.calibrationPlans.get(
+    `calibration:${today}:${trackId}`,
+  );
+  return plan ? normalizeCalibrationPlan(plan) : undefined;
 }
 
 export async function getCalibrationSummary(plan: CalibrationPlan) {
@@ -1498,7 +1951,12 @@ export async function recordReviewAnswer(
         planId,
         dateKey: plan.date,
         timestamp: Date.now(),
-        mode: plan.calibrationIds.includes(phraseId) ? "calibration" : "review",
+        mode:
+          plan.kind === "booster"
+            ? "booster"
+            : plan.calibrationIds.includes(phraseId)
+              ? "calibration"
+              : "review",
         questionType,
         skill,
         correct,
@@ -1606,7 +2064,17 @@ async function finalizeReviewAttempt(
   const gradedAttempt = { ...attempt, answers: firstPassAnswers };
   const results = firstPassAnswers.map((item) => item.correct);
 
-  if (plan.calibrationIds.includes(attempt.phraseId)) {
+  if (plan.kind === "booster") {
+    const progress = await db.cardProgress.get(attempt.phraseId);
+    if (progress) {
+      await db.cardProgress.put({
+        ...progress,
+        lastBoosterAt: now,
+        updatedAt: now,
+        skills: updateSkills(progress, gradedAttempt),
+      });
+    }
+  } else if (plan.calibrationIds.includes(attempt.phraseId)) {
     const progress = await db.cardProgress.get(attempt.phraseId);
     if (progress?.day0) {
       const resultsForGrade: CalibrationResult[] = firstPassAnswers.map(

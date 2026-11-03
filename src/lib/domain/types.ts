@@ -132,6 +132,7 @@ export interface CardProgress {
   senseUseCounts?: number[];
   lastSenseIndex?: number;
   sensePassedIndexes?: number[];
+  lastBoosterAt?: number;
   provisionalGrade?: Grade;
   confirmedGrade?: Grade;
   skills: Record<Skill, SkillState>;
@@ -179,6 +180,7 @@ export interface ReviewPlan {
   date: string;
   trackId: TrackId;
   phraseIds: string[];
+  kind?: "scheduled" | "booster";
   calibrationIds: string[];
   deferredPhraseIds: string[];
   completedPhraseIds: string[];
@@ -223,15 +225,7 @@ export interface CalibrationPlan {
     Partial<
       Record<
         "1" | "2" | "3" | "4",
-        {
-          firstCorrect: boolean;
-          finalCorrect: boolean;
-          correctStreak?: number;
-          correctCount?: number;
-          incorrectAttempts?: number;
-          attempts: number;
-          lastAttemptAt: number;
-        }
+        CalibrationRoundResult
       >
     >
   >;
@@ -241,6 +235,28 @@ export interface CalibrationPlan {
   completedAt?: number;
 }
 
+export interface CalibrationRoundResult {
+  firstCorrect: boolean;
+  finalCorrect: boolean;
+  correctStreak?: number;
+  correctCount?: number;
+  incorrectAttempts?: number;
+  failureStreak?: number;
+  attempts: number;
+  lastAttemptAt: number;
+  senses?: Record<string, CalibrationSenseResult>;
+}
+
+export interface CalibrationSenseResult {
+  firstCorrect: boolean;
+  finalCorrect: boolean;
+  correctStreak?: number;
+  correctCount?: number;
+  incorrectAttempts?: number;
+  attempts: number;
+  lastAttemptAt: number;
+}
+
 export interface ReviewLog {
   id?: number;
   phraseId: string;
@@ -248,7 +264,7 @@ export interface ReviewLog {
   planId: string;
   dateKey: string;
   timestamp: number;
-  mode: "learning" | "calibration" | "review";
+  mode: "learning" | "calibration" | "review" | "booster";
   questionType: QuestionType;
   skill: Skill;
   correct: boolean;

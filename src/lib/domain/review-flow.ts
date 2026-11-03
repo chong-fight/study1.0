@@ -198,13 +198,17 @@ export function chooseSenseIndex(
   allowedIndexes?: readonly number[],
 ): number | undefined {
   const senses = phrase.senses ?? [];
+  const primaryIndex = senses.findIndex((sense) => sense.primary);
+  const resolvedPrimaryIndex = primaryIndex >= 0 ? primaryIndex : 0;
   const allowed = (
     allowedIndexes ??
-    senses
-      .map((sense, index) => ({ sense, index }))
-      .filter((item) => !item.sense.primary)
-      .map((item) => item.index)
-  ).filter((index) => index > 0 && index < senses.length);
+    secondarySenseIndexes(phrase)
+  ).filter(
+    (index) =>
+      index >= 0 &&
+      index < senses.length &&
+      index !== resolvedPrimaryIndex,
+  );
   if (allowed.length === 0) return undefined;
   const candidates = allowed.map((index) => ({
     index,
@@ -218,6 +222,15 @@ export function chooseSenseIndex(
   );
   const fallback = candidates.filter((item) => item.count === minimum);
   return (preferred[0] ?? fallback[0])?.index;
+}
+
+export function secondarySenseIndexes(phrase: Phrase): number[] {
+  const senses = phrase.senses ?? [];
+  const primaryIndex = senses.findIndex((sense) => sense.primary);
+  const resolvedPrimaryIndex = primaryIndex >= 0 ? primaryIndex : 0;
+  return senses
+    .map((_, index) => index)
+    .filter((index) => index !== resolvedPrimaryIndex);
 }
 
 export function canUseContextChoice(phrase: Phrase): boolean {
@@ -350,13 +363,13 @@ export function buildQuestion(
 
   if (type === "senseChoice") {
     const senses = phrase.senses ?? [];
+    const secondaryIndexes = secondarySenseIndexes(phrase);
     const selectedIndex =
-      senseIndex !== undefined && senses[senseIndex]
+      senseIndex !== undefined &&
+      senses[senseIndex] &&
+      secondaryIndexes.includes(senseIndex)
         ? senseIndex
-        : Math.max(
-            1,
-            senses.findIndex((sense) => !sense.primary),
-          );
+        : secondaryIndexes[0] ?? 0;
     const sense = senses[selectedIndex] ?? senses[0];
     return {
       type,

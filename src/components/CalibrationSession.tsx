@@ -63,6 +63,8 @@ export default function CalibrationSession({
     passed: boolean;
   } | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [preparing, setPreparing] = useState(false);
+  const [answered, setAnswered] = useState(false);
   const [error, setError] = useState("");
   const startedAt = useRef(0);
   useQuestionScroll(Boolean(question), Boolean(feedback));
@@ -115,16 +117,30 @@ export default function CalibrationSession({
     setAnswer("");
     setSelected("");
     setFeedback(null);
+    setAnswered(false);
     startedAt.current = Date.now();
   }, [initialPlan, onComplete, today, trackId]);
 
   async function begin() {
+    if (preparing || started) return;
+    setPreparing(true);
     setStarted(true);
-    await prepare();
+    try {
+      await prepare();
+    } finally {
+      setPreparing(false);
+    }
   }
 
   async function submit() {
-    if (!question || !currentPhraseId || submitting) return;
+    if (
+      !question ||
+      !currentPhraseId ||
+      submitting ||
+      answered
+    ) {
+      return;
+    }
     const value = question.options ? selected : answer;
     if (!value.trim()) return;
     setSubmitting(true);
@@ -133,9 +149,13 @@ export default function CalibrationSession({
       const latestPlan = (await getCalibrationPlan(trackId, today)) ?? plan;
       const queue = await getCalibrationQueue(latestPlan);
       const item = queue.find((entry) => entry.phrase.id === currentPhraseId);
+      if (!item) {
+        setError("当前校准题已更新，请重新加载");
+        return;
+      }
       const correct = checkAnswer(question, value);
       const result = await recordCalibrationAnswer(
-        plan.id,
+        latestPlan.id,
         currentPhraseId,
         question.type,
         question.skill,
@@ -147,15 +167,7 @@ export default function CalibrationSession({
         question.senseIndex,
       );
       setPlan(result.plan);
-      const roundResult =
-        result.plan.results[currentPhraseId]?.[roundKey];
-      const requiredCorrect = question.type === "spelling" ? 3 : 1;
-      const correctStreak =
-        roundResult?.correctStreak ?? (correct ? 1 : 0);
-      const correctCount =
-        roundResult?.correctCount ?? (correct ? 1 : 0);
       const selectedSense =
-        item &&
         question.type === "senseChoice" &&
         question.senseIndex !== undefined
           ? item.phrase.senses?.[question.senseIndex]
@@ -178,11 +190,12 @@ export default function CalibrationSession({
           item?.phrase.synonyms.map(
             (entry) => `${entry.phrase}：${entry.usage}`,
           ) ?? [],
-        correctStreak,
-        correctCount,
-        requiredCorrect,
-        passed: correct && correctStreak >= requiredCorrect,
+        correctStreak: result.correctStreak,
+        correctCount: result.correctCount,
+        requiredCorrect: result.requiredCorrect,
+        passed: result.passed,
       });
+      setAnswered(true);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "验证结果保存失败");
     } finally {
@@ -191,16 +204,18 @@ export default function CalibrationSession({
   }
 
   async function next() {
-    if (feedback?.failed) {
+    if (preparing || submitting) return;
+    setPreparing(true);
+    try {
+      const latest = await getCalibrationPlan(trackId, today);
+      if (!latest || latest.status === "completed") {
+        onComplete();
+        return;
+      }
       await prepare();
-      return;
+    } finally {
+      setPreparing(false);
     }
-    const latest = await getCalibrationPlan(trackId, today);
-    if (!latest || latest.status === "completed") {
-      onComplete();
-      return;
-    }
-    await prepare();
   }
 
   if (!started) {
@@ -221,6 +236,7 @@ export default function CalibrationSession({
                 type="button"
                 className="filter-pill"
                 aria-pressed={track.id === trackId}
+                disabled={preparing}
                 onClick={() => onTrackChange(track.id)}
               >
                 {track.label}
@@ -237,7 +253,12 @@ export default function CalibrationSession({
                 共 {total} 条。每轮覆盖全部卡片：
                 {ROUND_LABELS.join("、")}。每轮最终答对后进入下一轮。
               </p>
-              <button type="button" className="primary-button" onClick={begin}>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={begin}
+                disabled={preparing}
+              >
                 开始验证
               </button>
             </div>
@@ -336,7 +357,7 @@ export default function CalibrationSession({
                         className="choice-button"
                         aria-pressed={selected === option}
                         onClick={() => setSelected(option)}
-                        disabled={submitting}
+                        disabled={submitting || answered}
                       >
                         {option}
                       </button>
@@ -351,7 +372,7 @@ export default function CalibrationSession({
                       onChange={(event) => setAnswer(event.target.value)}
                       placeholder="在这里输入"
                       autoFocus
-                      disabled={submitting}
+                      disabled={submitting || answered}
                       onKeyDown={(event) => {
                         if (event.key === "Enter") void submit();
                       }}
@@ -423,8 +444,9 @@ export default function CalibrationSession({
                   type="button"
                   className="primary-button wide"
                   onClick={next}
+                  disabled={submitting || preparing}
                 >
-                  {feedback.correct ? "下一张" : "继续"}
+                  {feedback.passed ? "下一张" : "继续"}
                 </button>
               ) : (
                 <button

@@ -1,5 +1,6 @@
-// Bump this value when a release must invalidate all cached pages.
-const CACHE_NAME = "phrase-memory-2-v15";
+// The build script replaces the placeholder with a content-derived release id.
+const CACHE_PREFIX = "phrase-memory-2-";
+const CACHE_NAME = `${CACHE_PREFIX}__BUILD_ID__`;
 
 self.addEventListener("install", () => {
   self.skipWaiting();
@@ -12,7 +13,11 @@ self.addEventListener("activate", (event) => {
       .then((keys) =>
         Promise.all(
           keys
-            .filter((key) => key !== CACHE_NAME)
+            .filter(
+              (key) =>
+                key.startsWith(CACHE_PREFIX) &&
+                key !== CACHE_NAME,
+            )
             .map((key) => caches.delete(key)),
         ),
       )
