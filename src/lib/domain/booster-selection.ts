@@ -1,5 +1,5 @@
 import { seededShuffle } from "./text";
-import type { Grade, Rating } from "./types";
+import type { CardProgress, Grade, Rating } from "./types";
 
 export interface BoosterCandidate {
   phraseId: string;
@@ -10,6 +10,8 @@ export interface BoosterCandidate {
   lapses: number;
   lastReviewAt?: number;
   lastBoosterAt?: number;
+  boosterMistakeCount?: number;
+  firstRoundWeaknessScore?: number;
 }
 
 const GRADE_RISK: Record<Grade, number> = {
@@ -42,10 +44,41 @@ function lastPracticedAt(candidate: BoosterCandidate): number {
   );
 }
 
+export function calculateFirstRoundWeaknessScore(
+  progress: CardProgress,
+  grade?: Grade,
+): number {
+  const resolvedGrade =
+    grade ?? progress.confirmedGrade ?? progress.provisionalGrade ?? "D";
+  const ratingRisk = progress.day0Rating
+    ? RATING_RISK[progress.day0Rating]
+    : 15;
+  const gateValues = Object.values(progress.day0Gates ?? {});
+  const gateErrors = gateValues.reduce(
+    (sum, gate) => sum + (gate?.incorrectAttempts ?? 0),
+    0,
+  );
+  const gateRetries = gateValues.reduce(
+    (sum, gate) => sum + Math.max(0, (gate?.attempts ?? 1) - 1),
+    0,
+  );
+  const fragileSkills = Object.values(progress.skills).filter(
+    (state) => state === "fragile",
+  ).length;
+  return (
+    GRADE_RISK[resolvedGrade] +
+    ratingRisk +
+    gateErrors * 4 +
+    gateRetries * 2 +
+    fragileSkills * 5
+  );
+}
+
 export function selectBoosterCandidates(
   candidates: readonly BoosterCandidate[],
   limit: number,
   seed: string,
+  round = 2,
 ): string[] {
   if (limit <= 0) return [];
   const shuffled = seededShuffle(candidates, seed);
@@ -55,27 +88,30 @@ export function selectBoosterCandidates(
 
   return [...candidates]
     .sort((left, right) => {
-      const leftPracticed = left.lastBoosterAt !== undefined;
-      const rightPracticed = right.lastBoosterAt !== undefined;
-      if (leftPracticed !== rightPracticed) {
-        return leftPracticed ? 1 : -1;
+      if (round >= 3) {
+        const boosterMistakeDifference =
+          (right.boosterMistakeCount ?? 0) -
+          (left.boosterMistakeCount ?? 0);
+        if (boosterMistakeDifference !== 0) {
+          return boosterMistakeDifference;
+        }
       }
-      if (leftPracticed && rightPracticed) {
-        const boosterAgeDifference =
-          (left.lastBoosterAt ?? 0) - (right.lastBoosterAt ?? 0);
-        if (boosterAgeDifference !== 0) return boosterAgeDifference;
-      }
+      const firstRoundDifference =
+        (right.firstRoundWeaknessScore ?? candidateRisk(right)) -
+        (left.firstRoundWeaknessScore ?? candidateRisk(left));
+      if (firstRoundDifference !== 0) return firstRoundDifference;
       const riskDifference = candidateRisk(right) - candidateRisk(left);
       if (riskDifference !== 0) return riskDifference;
+      const boosterAgeDifference =
+        (left.lastBoosterAt ?? 0) - (right.lastBoosterAt ?? 0);
+      if (boosterAgeDifference !== 0) return boosterAgeDifference;
+      const reviewAgeDifference =
+        lastPracticedAt(left) - lastPracticedAt(right);
+      if (reviewAgeDifference !== 0) return reviewAgeDifference;
       const mistakeDifference =
         right.mistakeCount + right.lapses -
         (left.mistakeCount + left.lapses);
       if (mistakeDifference !== 0) return mistakeDifference;
-      if (!leftPracticed) {
-        const reviewAgeDifference =
-          lastPracticedAt(left) - lastPracticedAt(right);
-        if (reviewAgeDifference !== 0) return reviewAgeDifference;
-      }
       return (
         (shuffledRank.get(left.phraseId) ?? 0) -
         (shuffledRank.get(right.phraseId) ?? 0)

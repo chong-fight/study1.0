@@ -301,13 +301,15 @@ describe("audit regression fixes", () => {
     ).plan;
     expect(plan.currentRound).toBe(4);
 
-    for (let index = 0; index < 3; index += 1) {
+    for (let index = 0; index < 2; index += 1) {
       plan = (
         await answerCalibration(plan, phrase.id, "spelling", true)
       ).plan;
     }
     expect(plan.status).toBe("completed");
-    expect((await db.cardProgress.get(phrase.id))?.confirmedGrade).toBe("B");
+    const completed = await db.cardProgress.get(phrase.id);
+    expect(completed?.confirmedGrade).toBe("B");
+    expect(completed?.firstRoundWeaknessScore).toBeTypeOf("number");
   });
 
   it("handles a primary sense that is not at index zero", async () => {

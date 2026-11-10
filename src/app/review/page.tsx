@@ -4,7 +4,11 @@ import Link from "next/link";
 import { ArrowLeft, ArrowRight, RotateCcw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import CalibrationSession from "@/components/CalibrationSession";
-import { TRACKS, TRACK_LIST } from "@/lib/domain/constants";
+import {
+  SPELLING_REQUIRED_CORRECT,
+  TRACKS,
+  TRACK_LIST,
+} from "@/lib/domain/constants";
 import {
   buildQuestion,
   checkAnswer,
@@ -14,6 +18,10 @@ import {
   type ReviewQuestion,
 } from "@/lib/domain/review-flow";
 import { shuffle } from "@/lib/domain/text";
+import {
+  createRequestEpoch,
+  isTrackSwitchLocked,
+} from "@/lib/domain/track-selection";
 import type {
   CalibrationPlan,
   Grade,
@@ -74,7 +82,7 @@ export default function ReviewPage() {
   const [boosterRequested, setBoosterRequested] = useState(false);
   const [error, setError] = useState("");
   const startTime = useRef(0);
-  const loadSequence = useRef(0);
+  const requestEpoch = useRef(createRequestEpoch());
   const activeTrack = useRef(trackId);
   useQuestionScroll(Boolean(question), Boolean(feedback));
 
@@ -84,7 +92,7 @@ export default function ReviewPage() {
 
   const loadReady = useCallback(
     async (selectedTrack: TrackId) => {
-      const requestSequence = ++loadSequence.current;
+      const requestSequence = requestEpoch.current.next();
       setLoading(true);
       setPreparing(false);
       const nextCalibration = await ensureCalibrationPlan(
@@ -92,14 +100,14 @@ export default function ReviewPage() {
         today,
         getSettings(),
       );
-      if (requestSequence !== loadSequence.current) return;
+      if (!requestEpoch.current.isCurrent(requestSequence)) return;
       setCalibrationPlan(nextCalibration);
       const nextSummary =
         nextCalibration.status === "completed" &&
           nextCalibration.phraseIds.length > 0
           ? await getCalibrationSummary(nextCalibration)
           : { S: 0, A: 0, B: 0, C: 0, D: 0, failed: 0 };
-      if (requestSequence !== loadSequence.current) return;
+      if (!requestEpoch.current.isCurrent(requestSequence)) return;
       setCalibrationSummary(nextSummary);
       if (
         nextCalibration.status === "active" &&
@@ -121,7 +129,7 @@ export default function ReviewPage() {
             getSettings(),
           )
         : await ensureReviewPlan(selectedTrack, today, getSettings());
-      if (requestSequence !== loadSequence.current) return;
+      if (!requestEpoch.current.isCurrent(requestSequence)) return;
       setPlan(nextPlan);
       setDoneCount(nextPlan.completedPhraseIds.length);
       setStarted(false);
@@ -143,7 +151,7 @@ export default function ReviewPage() {
   }, [loadReady, trackId, trackReady]);
 
   const prepareCurrent = useCallback(async () => {
-    const requestSequence = ++loadSequence.current;
+    const requestSequence = requestEpoch.current.next();
     const requestedTrack = trackId;
     setPreparing(true);
     setError("");
@@ -154,14 +162,14 @@ export default function ReviewPage() {
         getSettings(),
       );
       if (
-        requestSequence !== loadSequence.current ||
+        !requestEpoch.current.isCurrent(requestSequence) ||
         activeTrack.current !== requestedTrack
       ) {
         return;
       }
       const queue = await getReviewQueue(currentPlan);
       if (
-        requestSequence !== loadSequence.current ||
+        !requestEpoch.current.isCurrent(requestSequence) ||
         activeTrack.current !== requestedTrack
       ) {
         return;
@@ -181,7 +189,7 @@ export default function ReviewPage() {
         latestPlan = await startReviewAttempt(latestPlan.id, item.phrase.id);
       }
       if (
-        requestSequence !== loadSequence.current ||
+        !requestEpoch.current.isCurrent(requestSequence) ||
         activeTrack.current !== requestedTrack
       ) {
         return;
@@ -215,7 +223,7 @@ export default function ReviewPage() {
         senseIndex,
       );
       if (
-        requestSequence !== loadSequence.current ||
+        !requestEpoch.current.isCurrent(requestSequence) ||
         activeTrack.current !== requestedTrack
       ) {
         return;
@@ -235,7 +243,7 @@ export default function ReviewPage() {
       startTime.current = Date.now();
     } catch (caught) {
       if (
-        requestSequence === loadSequence.current &&
+        requestEpoch.current.isCurrent(requestSequence) &&
         activeTrack.current === requestedTrack
       ) {
         setError(
@@ -243,7 +251,7 @@ export default function ReviewPage() {
         );
       }
     } finally {
-      if (requestSequence === loadSequence.current) {
+      if (requestEpoch.current.isCurrent(requestSequence)) {
         setPreparing(false);
       }
     }
@@ -314,7 +322,7 @@ export default function ReviewPage() {
         (entry) => `${entry.phrase}：${entry.usage}`,
       ),
       correctStreak: spellingCorrectCount,
-      requiredCorrect: 3,
+      requiredCorrect: SPELLING_REQUIRED_CORRECT,
     });
     setAnswered(true);
     } catch (caught) {
@@ -352,6 +360,8 @@ export default function ReviewPage() {
   }
 
   const total = plan?.phraseIds.length ?? 0;
+  const boosterRound = plan?.boosterRound ?? 2;
+  const boosterLabel = `第${boosterRound}轮巩固`;
   const calibrationCompletedToday =
     calibrationPlan?.status === "completed" &&
     calibrationPlan.phraseIds.length > 0;
@@ -367,7 +377,7 @@ export default function ReviewPage() {
           <span className="meta">
             {TRACKS[trackId].label} ·{" "}
             {total > 0
-              ? `${plan?.kind === "booster" ? "巩固" : "复习"} ${Math.min(
+              ? `${plan?.kind === "booster" ? boosterLabel : "复习"} ${Math.min(
                   doneCount + 1,
                   total,
                 )} / ${total}`
@@ -403,7 +413,11 @@ export default function ReviewPage() {
               type="button"
               className="filter-pill"
               aria-pressed={trackId === track.id}
-                disabled={submitting || preparing}
+                disabled={isTrackSwitchLocked({
+                  loading,
+                  submitting,
+                  preparing,
+                })}
               onClick={() => {
                 setTrackId(track.id);
               }}
@@ -454,7 +468,7 @@ export default function ReviewPage() {
               ) : (
                 <p>
                   {boosterRequested
-                    ? "当前还有未学新词、未完成学习或到期复习时，会优先处理它们；全部完成后再进入第二轮巩固。"
+                    ? "当前还有未学新词、未完成学习或到期复习时，会优先处理它们；全部完成后再进入巩固。"
                     : "新学的短语会在明天进入校准，长期复习也会按本地日期自动出现。"}
                 </p>
               )}
@@ -470,15 +484,15 @@ export default function ReviewPage() {
               <h2>
                 {plan?.status === "completed"
                   ? plan.kind === "booster"
-                    ? "第二轮巩固完成"
+                    ? `${boosterLabel}完成`
                     : "今日复习完成"
                   : plan?.kind === "booster"
-                    ? "第二轮巩固"
+                    ? boosterLabel
                     : "今日复习"}
               </h2>
               <p>
                 {plan?.kind === "booster"
-                  ? `共 ${total} 条第二轮巩固。练习记录会保留，但不会改变正式复习日期。`
+                  ? `共 ${total} 条${boosterLabel}。练习记录会保留，但不会改变正式复习日期。`
                   : `共 ${total} 条。每张卡会抽取两种不同题型，首次作答和纠错结果分别记录。`}
               </p>
               {plan?.status !== "completed" ? (

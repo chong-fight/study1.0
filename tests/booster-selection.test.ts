@@ -31,28 +31,29 @@ describe("booster candidate selection", () => {
     expect(selected).toEqual(["weak", "middle"]);
   });
 
-  it("covers never-practiced cards before repeating practiced cards", () => {
+  it("orders the current booster round by first-round weakness", () => {
     const selected = selectBoosterCandidates(
       [
         {
-          phraseId: "practiced-weak",
-          grade: "D",
-          mistakeCount: 8,
-          lapses: 3,
-          lastBoosterAt: 300,
-        },
-        {
-          phraseId: "fresh",
+          phraseId: "strong-first-round",
           grade: "A",
           mistakeCount: 0,
           lapses: 0,
+          firstRoundWeaknessScore: 20,
+        },
+        {
+          phraseId: "weak-first-round",
+          grade: "D",
+          mistakeCount: 0,
+          lapses: 0,
+          firstRoundWeaknessScore: 80,
         },
       ],
       1,
       "coverage",
     );
 
-    expect(selected).toEqual(["fresh"]);
+    expect(selected).toEqual(["weak-first-round"]);
   });
 
   it("starts the next cycle with the cards practiced longest ago", () => {
@@ -82,9 +83,50 @@ describe("booster candidate selection", () => {
       ],
       3,
       "rotation",
+      3,
     );
 
     expect(selected).toEqual(["oldest", "mistake-heavy", "recent"]);
+  });
+
+  it("returns booster failures before clean cards in the next cycle", () => {
+    const selected = selectBoosterCandidates(
+      [
+        {
+          phraseId: "clean-recent",
+          grade: "B",
+          mistakeCount: 0,
+          lapses: 0,
+          lastBoosterAt: 300,
+          boosterMistakeCount: 0,
+        },
+        {
+          phraseId: "failed-older",
+          grade: "B",
+          mistakeCount: 0,
+          lapses: 0,
+          lastBoosterAt: 100,
+          boosterMistakeCount: 2,
+        },
+        {
+          phraseId: "clean-oldest",
+          grade: "B",
+          mistakeCount: 0,
+          lapses: 0,
+          lastBoosterAt: 50,
+          boosterMistakeCount: 0,
+        },
+      ],
+      3,
+      "booster-failures",
+      3,
+    );
+
+    expect(selected).toEqual([
+      "failed-older",
+      "clean-oldest",
+      "clean-recent",
+    ]);
   });
 
   it("uses mistakes to order cards practiced at the same time", () => {

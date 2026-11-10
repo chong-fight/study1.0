@@ -8,6 +8,10 @@ import { TRACKS, TRACK_LIST } from "@/lib/domain/constants";
 import { isPreviewRecognized } from "@/lib/domain/learning-policy";
 import { orderPreviewCandidates } from "@/lib/domain/preview-order";
 import {
+  createRequestEpoch,
+  isTrackSwitchLocked,
+} from "@/lib/domain/track-selection";
+import {
   buildQuestion,
   canUseContextChoice,
   checkAnswer,
@@ -82,7 +86,7 @@ export default function LearnPage() {
   const [error, setError] = useState("");
   const startedAt = useRef(0);
   const previewSaving = useRef(false);
-  const loadSequence = useRef(0);
+  const requestEpoch = useRef(createRequestEpoch());
   useQuestionScroll(Boolean(question), Boolean(feedback));
 
   const current = queue[0];
@@ -164,11 +168,11 @@ export default function LearnPage() {
 
   const loadSession = useCallback(
     async (selectedTrack: TrackId) => {
-      const requestSequence = ++loadSequence.current;
+      const requestSequence = requestEpoch.current.next();
       setLoading(true);
       setError("");
       const currentSession = await getLearningSession(selectedTrack, today);
-      if (requestSequence !== loadSequence.current) return;
+      if (!requestEpoch.current.isCurrent(requestSequence)) return;
       setSession(currentSession ?? null);
       if (!currentSession || currentSession.status === "completed") {
         setQueue([]);
@@ -183,7 +187,7 @@ export default function LearnPage() {
         getLearningCards(currentSession),
         getLearningGateQueue(currentSession),
       ]);
-      if (requestSequence !== loadSequence.current) return;
+      if (!requestEpoch.current.isCurrent(requestSequence)) return;
       setLearningCards(cards);
       setQueue(
         nextQueue.filter((item) =>
@@ -218,7 +222,7 @@ export default function LearnPage() {
         setStep("overview");
       } else {
         const nextQuestion = await buildGateQuestion(first);
-        if (requestSequence !== loadSequence.current) return;
+        if (!requestEpoch.current.isCurrent(requestSequence)) return;
         setQuestion(nextQuestion);
         setStep("answer");
       }
@@ -249,7 +253,7 @@ export default function LearnPage() {
         setSession(null);
         setQueue([]);
         setError(
-          "这条学习线已经没有新的未学短语。可以从今日页进入第二轮巩固。",
+          "这条学习线已经没有新的未学短语。可以从今日页进入巩固。",
         );
         return;
       }
@@ -434,7 +438,12 @@ export default function LearnPage() {
               type="button"
               className="filter-pill"
               aria-pressed={trackId === track.id}
-              disabled={starting || submitting || previewBusy}
+              disabled={isTrackSwitchLocked({
+                loading,
+                starting,
+                submitting,
+                previewBusy,
+              })}
               onClick={() => setTrackId(track.id)}
               key={track.id}
             >
@@ -475,14 +484,14 @@ export default function LearnPage() {
             <div>
               <h2>第 0 天学习完成</h2>
               <p>
-                已完成含义、产出、语境和出口测试。明天进行四轮验证；如果这条学习线没有新词，也可以进入第二轮巩固。
+                已完成含义、产出、语境和出口测试。明天进行四轮验证；如果这条学习线没有新词，也可以进入巩固。
               </p>
               <div className="create-flow">
                 <Link
                   href={`/review?booster=1&track=${trackId}`}
                   className="primary-button wide"
                 >
-                  第二轮巩固
+                  进入巩固
                 </Link>
                 <Link href="/" className="secondary-button wide">
                   返回今日

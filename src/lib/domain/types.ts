@@ -133,6 +133,11 @@ export interface CardProgress {
   lastSenseIndex?: number;
   sensePassedIndexes?: number[];
   lastBoosterAt?: number;
+  boosterMistakeCount?: number;
+  lastBoosterPassed?: boolean;
+  boosterCompletedRounds?: number;
+  lastBoosterRound?: number;
+  firstRoundWeaknessScore?: number;
   provisionalGrade?: Grade;
   confirmedGrade?: Grade;
   skills: Record<Skill, SkillState>;
@@ -181,6 +186,7 @@ export interface ReviewPlan {
   trackId: TrackId;
   phraseIds: string[];
   kind?: "scheduled" | "booster";
+  boosterRound?: number;
   calibrationIds: string[];
   deferredPhraseIds: string[];
   completedPhraseIds: string[];

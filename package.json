@@ -11,6 +11,10 @@
     "typecheck": "tsc --noEmit --incremental false",
     "test": "vitest run --configLoader runner",
     "test:watch": "vitest --configLoader runner",
+    "test:e2e": "npm run build && node scripts/run-playwright.mjs",
+    "test:e2e:pages": "node scripts/build-e2e-pages.mjs && node scripts/run-playwright.mjs --pages",
+    "test:e2e:pwa": "node e2e/pwa-cache-upgrade.mjs",
+    "test:e2e:all": "npm run test:e2e && npm run test:e2e:pages && npm run test:e2e:pwa",
     "audit:data": "node scripts/audit-local-data.mjs",
     "enrich:data": "node scripts/enrich-local-data.mjs",
     "generate:quiz-examples": "node scripts/generate-quiz-examples.mjs",
@@ -29,6 +33,7 @@
     "react-dom": "19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "1.51.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

@@ -1,5 +1,5 @@
 import { isAcceptedMeaning, isAcceptedPhrase } from "./text";
-import { TRACKS } from "./constants";
+import { SPELLING_REQUIRED_CORRECT, TRACKS } from "./constants";
 import type {
   CardProgress,
   ExerciseMode,
@@ -305,7 +305,10 @@ export function buildReviewAttemptTypes(
   return chooseReviewTypes(phrase, progress, random).flatMap(
     (questionType) =>
       questionType === "spelling"
-        ? (["spelling", "spelling", "spelling"] as QuestionType[])
+        ? (Array.from(
+            { length: SPELLING_REQUIRED_CORRECT },
+            () => "spelling" as QuestionType,
+          ))
         : [questionType],
   );
 }

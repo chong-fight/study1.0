@@ -71,6 +71,8 @@ export const GRADE_PRIORITY: Record<Grade, number> = {
   S: 20,
 };
 
+export const SPELLING_REQUIRED_CORRECT = 2;
+
 export const DEFAULT_EXERCISE_MODES: Record<TrackId, ExerciseMode[]> = {
   fixed: ["recognition", "production", "cloze"],
   "verb-pattern": ["recognition", "production", "patternChoice"],

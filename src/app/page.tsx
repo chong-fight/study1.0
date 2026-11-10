@@ -6,10 +6,12 @@ import {
   BookOpen,
   Download,
   RotateCcw,
+  Sparkles,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import PageHeader from "@/components/PageHeader";
 import PhraseDetail from "@/components/PhraseDetail";
+import QuickReviewSheet from "@/components/QuickReviewSheet";
 import Sheet from "@/components/Sheet";
 import {
   DEFAULT_SETTINGS,
@@ -21,6 +23,7 @@ import type { AppSettings, Phrase, TrackId } from "@/lib/domain/types";
 import {
   getStats,
   getTodayData,
+  summarizeTodayData,
   type TrackTodayData,
 } from "@/lib/data/repositories";
 import { getSettings } from "@/lib/data/settings";
@@ -34,6 +37,7 @@ export default function TodayPage() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<Filter>("all");
   const [detail, setDetail] = useState<Phrase | null>(null);
+  const [quickReviewOpen, setQuickReviewOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const today = useLocalDay();
 
@@ -59,72 +63,46 @@ export default function TodayPage() {
       ? data
       : data.filter((item) => item.trackId === filter);
 
-  const totals = useMemo(() => {
-    const total = visibleTracks.reduce((sum, track) => {
-      const newTotal = track.session
-        ? track.learningPhrases.length
-        : track.newPhrases.length;
-      return sum + newTotal + track.reviewPhrases.length;
-    }, 0);
-    const done = visibleTracks.reduce(
-      (sum, track) =>
-        sum +
-        track.learningDone +
-        track.reviewSettledIds.length,
-      0,
-    );
-    return { total, done };
+  const summary = useMemo(
+    () => summarizeTodayData(data, filter),
+    [data, filter],
+  );
+  const quickReviewPhrases = useMemo(() => {
+    const byId = new Map<string, Phrase>();
+    for (const track of visibleTracks) {
+      const phrases = track.session
+        ? track.learningPhrases
+        : track.newPhrases;
+      for (const phrase of phrases) byId.set(phrase.id, phrase);
+    }
+    return [...byId.values()];
   }, [visibleTracks]);
 
-  const hasDue = data.some(
-    (track) => track.reviewPendingIds.length > 0,
-  );
-  const dueCount = data.reduce(
-    (sum, track) => sum + track.reviewPendingIds.length,
-    0,
-  );
-  const actualDueCount = data.reduce(
-    (sum, track) =>
-      sum + track.calibrationPhrases.length + track.duePhrases.length,
-    0,
-  );
-  const boosterOnly =
-    hasDue &&
-    actualDueCount === 0 &&
-    data.some(
-      (track) =>
-        track.plan?.kind === "booster" && track.plan.status === "active",
-    );
   const newLearningThrottled =
-    dueCount >= settings.totalReviewLimit * 0.8;
-  const newLearningPaused = dueCount >= settings.totalReviewLimit;
-  const hasLearning = data.some(
-    (track) =>
-      track.session?.status === "active" || track.newPhrases.length > 0,
-  );
-  const boosterTrack = data.find(
-    (track) => track.boosterPhrases.length > 0,
-  )?.trackId;
-  const failedTodayCount = data.reduce(
-    (sum, track) => sum + track.reviewFailedIds.length,
-    0,
-  );
+    summary.dueCount >= settings.totalReviewLimit * 0.8;
+  const newLearningPaused =
+    summary.dueCount >= settings.totalReviewLimit;
+  const hasLearning = summary.hasLearning;
+  const boosterTrackData = summary.boosterTrackData;
+  const boosterTrack = boosterTrackData?.trackId;
+  const boosterLabel = `第${boosterTrackData?.boosterRound ?? 2}轮巩固`;
+  const failedTodayCount = summary.failedTodayCount;
   const hasBooster = Boolean(boosterTrack);
-  const primaryHref = hasDue
+  const primaryHref = summary.hasDue
     ? "/review"
     : hasLearning
       ? "/learn"
       : hasBooster
         ? `/review?booster=1&track=${boosterTrack}`
         : "/import";
-  const primaryLabel = hasDue
-    ? boosterOnly
-      ? "开始第二轮巩固"
+  const primaryLabel = summary.hasDue
+    ? summary.boosterOnly
+      ? `开始${boosterLabel}`
       : "开始今日复习"
     : hasLearning
       ? "开始今日学习"
       : hasBooster
-        ? "开始第二轮巩固"
+        ? `开始${boosterLabel}`
         : "导入学习内容";
 
   if (loading) return <div className="spinner" aria-label="正在加载" />;
@@ -169,21 +147,21 @@ export default function TodayPage() {
         {newLearningThrottled ? (
           <div className="warning-list" role="status">
             {newLearningPaused
-              ? `今日到期 ${dueCount} 条，已达到复习上限。新学默认暂停，先把积压复习完成。`
-              : `今日到期 ${dueCount} 条，复习接近上限，新学数量会自动减半。`}
+              ? `今日到期 ${summary.dueCount} 条，已达到复习上限。新学默认暂停，先把积压复习完成。`
+              : `今日到期 ${summary.dueCount} 条，复习接近上限，新学数量会自动减半。`}
           </div>
         ) : null}
         <section className="overview-panel" aria-label="今日学习概览">
           <div className="progress-row">
             <span>今日进度</span>
             <strong className="progress-number">
-              {totals.done} <small>/ {totals.total}</small>
+              {summary.done} <small>/ {summary.total}</small>
             </strong>
           </div>
           <div className="line-progress">
             <i
               style={{
-                "--progress": `${totals.total === 0 ? 100 : (totals.done / totals.total) * 100}%`,
+                "--progress": `${summary.total === 0 ? 100 : (summary.done / summary.total) * 100}%`,
               } as React.CSSProperties}
             />
           </div>
@@ -247,17 +225,17 @@ export default function TodayPage() {
         <section>
           <div className="section-heading">
             <h2>今日背诵</h2>
-            <span>
-              {visibleTracks.reduce(
-                (sum, track) =>
-                  sum +
-                  (track.session
-                    ? track.learningPhrases.length - track.learningDone
-                    : track.newPhrases.length),
-                0,
-              )}{" "}
-              条待学
-            </span>
+            <span>{summary.newPendingCount} 条待学</span>
+            {quickReviewPhrases.length > 0 ? (
+              <button
+                type="button"
+                className="quick-review-trigger"
+                onClick={() => setQuickReviewOpen(true)}
+              >
+                <Sparkles aria-hidden="true" />
+                今日快闪
+              </button>
+            ) : null}
           </div>
           <div className="phrase-list">
             {visibleTracks.flatMap((track) => {
@@ -304,13 +282,10 @@ export default function TodayPage() {
 
         <section>
           <div className="section-heading">
-            <h2>{boosterOnly ? "第二轮巩固" : "今日复习"}</h2>
+            <h2>{summary.boosterOnly ? boosterLabel : "今日复习"}</h2>
             <span>
-              {visibleTracks.reduce(
-                (sum, track) => sum + track.reviewPendingIds.length,
-                0,
-              )}{" "}
-              {boosterOnly ? "条待巩固" : "条到期"}
+              {summary.reviewPendingCount}{" "}
+              {summary.boosterOnly ? "条待巩固" : "条到期"}
             </span>
           </div>
           <div className="phrase-list">
@@ -342,7 +317,7 @@ export default function TodayPage() {
                 </button>
               )),
             )}
-            {!hasDue ? (
+            {!summary.hasDue ? (
               <div className="summary-row">
                 <span>
                   {failedTodayCount > 0
@@ -361,7 +336,7 @@ export default function TodayPage() {
 
         <div className="create-flow">
           <Link href={primaryHref} className="primary-button wide">
-            {hasDue || hasBooster ? (
+            {summary.hasDue || hasBooster ? (
               <RotateCcw size={17} aria-hidden="true" />
             ) : (
               <BookOpen size={17} aria-hidden="true" />
@@ -375,6 +350,13 @@ export default function TodayPage() {
         <Sheet title="短语详情" onClose={() => setDetail(null)}>
           <PhraseDetail phrase={detail} />
         </Sheet>
+      ) : null}
+      {quickReviewOpen ? (
+        <QuickReviewSheet
+          phrases={quickReviewPhrases}
+          today={today}
+          onClose={() => setQuickReviewOpen(false)}
+        />
       ) : null}
     </main>
   );

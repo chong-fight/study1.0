@@ -2,7 +2,9 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 
-const root = path.resolve(import.meta.dirname, "../out");
+const root = path.resolve(
+  process.env.STATIC_ROOT || path.join(import.meta.dirname, "../out"),
+);
 const port = Number(process.env.PORT || 4175);
 const basePath = (process.env.NEXT_PUBLIC_BASE_PATH || "").replace(/\/$/, "");
 const localPreviewSeedEnabled =
@@ -20,6 +22,15 @@ const types = {
 http
   .createServer((request, response) => {
     const pathname = decodeURIComponent((request.url || "/").split("?")[0]);
+    if (
+      process.env.E2E_DONE_FILE &&
+      pathname === `${basePath}/__e2e_done`
+    ) {
+      fs.writeFileSync(process.env.E2E_DONE_FILE, String(Date.now()), "utf8");
+      response.writeHead(204);
+      response.end();
+      return;
+    }
     if (
       localPreviewSeedEnabled &&
       pathname === "/local-preview/fixed.json"

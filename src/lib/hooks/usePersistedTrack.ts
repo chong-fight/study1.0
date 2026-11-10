@@ -1,13 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import {
+  replaceTrackInUrl,
+  resolveTrackId,
+} from "@/lib/domain/track-selection";
 import type { TrackId } from "@/lib/domain/types";
-
-const TRACKS = new Set<TrackId>(["fixed", "verb-pattern"]);
-
-function isTrackId(value: string | null): value is TrackId {
-  return Boolean(value && TRACKS.has(value as TrackId));
-}
 
 export function usePersistedTrack(
   storageKey = "phrase-memory-2-active-track",
@@ -23,11 +21,7 @@ export function usePersistedTrack(
       // Local storage can be unavailable in private browsing contexts.
     }
     const requested = new URLSearchParams(window.location.search).get("track");
-    const nextTrack = isTrackId(requested)
-      ? requested
-      : isTrackId(stored)
-        ? stored
-        : null;
+    const nextTrack = resolveTrackId(requested, stored);
     if (nextTrack) {
       setTrackState(nextTrack);
       if (requested && requested !== stored) {
@@ -50,12 +44,10 @@ export function usePersistedTrack(
         // The in-memory selection still works without local storage.
       }
       try {
-        const url = new URL(window.location.href);
-        url.searchParams.set("track", nextTrack);
         window.history.replaceState(
           window.history.state,
           "",
-          `${url.pathname}${url.search}${url.hash}`,
+          replaceTrackInUrl(window.location.href, nextTrack),
         );
       } catch {
         // Updating the address bar is optional; the selection is already in memory.

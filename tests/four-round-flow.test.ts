@@ -61,7 +61,7 @@ describe("day 0 four gates", () => {
 
     for (const gate of ["meaning", "production", "application", "exit"] as const) {
       const type = types[gate];
-      const repeats = gate === "production" ? 3 : 1;
+      const repeats = gate === "production" ? 2 : 1;
       for (let attempt = 1; attempt <= repeats; attempt += 1) {
         const queue = await getLearningGateQueue(session!);
         expect(queue).toHaveLength(1);
@@ -122,7 +122,7 @@ describe("day 1 four calibration rounds", () => {
       keyof typeof gateData,
       { type: "meaning" | "spelling" | "contextChoice" | "phraseChoice"; skill: "recognition" | "production" | "usage" | "pattern" },
     ][]) {
-      const repeats = gate === "production" ? 3 : 1;
+      const repeats = gate === "production" ? 2 : 1;
       for (let attempt = 1; attempt <= repeats; attempt += 1) {
         await recordLearningGateAnswer(
           session!.id,
@@ -145,7 +145,7 @@ describe("day 1 four calibration rounds", () => {
       DEFAULT_SETTINGS,
     );
     for (let round = 1; round <= 4; round += 1) {
-      const repeats = round === 4 ? 3 : 1;
+      const repeats = round === 4 ? 2 : 1;
       for (let attempt = 1; attempt <= repeats; attempt += 1) {
         const queue = await getCalibrationQueue(plan);
         expect(queue).toHaveLength(1);

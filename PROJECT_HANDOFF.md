@@ -1061,3 +1061,825 @@ http://127.0.0.1:4177/learn/
 - 中文答案不能退化为只接受某个单一标点写法。
 - 不确定时先增加测试，不要直接推倒数据事务。
 
+---
+
+# 2026-11-05 当前重构交接（此附录优先）
+
+> 本节是当前源码的唯一事实来源。前文保留为历史设计记录；如果前文与本附录冲突，以本附录和 `tests/` 中的现行测试为准。
+
+## A1. 项目绝对路径
+
+```text
+C:\Users\heyic\Documents\Codex\2026-10-26\c-users-heyic-projects-phrase-app-2\短词记2.0
+```
+
+项目当前不是 Git 仓库。历史本地词库仅在：
+
+```text
+C:\Users\heyic\Documents\Codex\2026-10-26\c-users-heyic-projects-phrase-app-2\短词记2.0\local-data
+```
+
+`local-data/` 已加入 `.gitignore`，不得进入 GitHub 上传包。
+
+## A2. 当前验证结果
+
+截至 2026-11-05：
+
+```text
+21 test files passed
+88 tests passed
+typecheck passed
+lint passed
+production static build passed
+```
+
+统一验证：
+
+```powershell
+cd "C:\Users\heyic\Documents\Codex\2026-10-26\c-users-heyic-projects-phrase-app-2\短词记2.0"
+npm.cmd run check
+```
+
+## A3. 页面与路由
+
+```text
+src/app/page.tsx             今日页
+src/app/learn/page.tsx       新学与第 0 天四关
+src/app/review/page.tsx      隔天校准、正式复习、巩固
+src/app/library/page.tsx     词库
+src/app/import/page.tsx      JSON 导入
+src/app/profile/page.tsx     设置、统计、备份恢复
+src/components/QuickReviewSheet.tsx  今日快闪
+```
+
+## A4. 今日页与今日快闪
+
+今日页读取 `getTodayData()`，分别展示：
+
+```text
+fixed          固定搭配
+verb-pattern   动词句型
+```
+
+今日统计使用显式 ID 集合：
+
+```text
+reviewCompletedIds      成功完成
+reviewFailedIds         今日失败、明天重试
+reviewSettledIds        今日已处理 = 成功 + 失败待重试
+reviewPendingIds        仍待处理
+```
+
+“今日背诵”右侧提供“今日快闪”按钮。
+
+快闪内容：
+
+```text
+track.session ? track.learningPhrases : track.newPhrases
+```
+
+默认覆盖当前筛选下两条学习线今天的学习内容。
+
+方向：
+
+```text
+English -> 中文
+中文 -> English
+```
+
+规则：
+
+- 每张卡答对一次即从当前方向队列移除。
+- 答错不推进，可以重试。
+- 两个方向分别记录进度。
+- 进度使用 localStorage，仅在当天有效：
+
+```text
+phrase-memory-2-quick-review:YYYY-MM-DD:en-zh
+phrase-memory-2-quick-review:YYYY-MM-DD:zh-en
+```
+
+- 快闪不写 ReviewLog、CardProgress 或 ReviewState，不影响校准和正式复习。
+
+## A5. 新学流程
+
+每条学习线每天最多创建一个：
+
+```text
+id = YYYY-MM-DD:trackId
+```
+
+默认每日新学：
+
+| 项目 | 固定搭配 | 动词句型 |
+|---|---:|---:|
+| 每日新学 | 6 | 4 |
+| 每日复习上限 | 25 | 25 |
+| 两线复习总上限 | 50 | 50 |
+
+到期正式任务达到总容量 80% 时新学减半，达到 100% 时暂停新学。
+
+新词选择：
+
+1. 当前学习线未学、未归档。
+2. priority 小的优先。
+3. 同优先随机。
+4. 避免同 confusionGroup 或近义冲突。
+5. 冲突导致不足时允许第二轮放宽补齐。
+
+## A6. 第 0 天预览
+
+- 正面只显示英语。
+- 点击后 3D 翻到中文、其他义项、例句和翻译。
+- 每次重新出现先重置到英文正面。
+- 可以直接点评级，不强制翻面。
+
+预览累计确认目标：
+
+| 初始评级 | 次数 |
+|---|---:|
+| 认识 | 2 |
+| 模糊 | 3 |
+| 陌生 | 4 |
+
+相邻确认轮顺序不能完全相同，刷新后同一轮顺序稳定。
+
+## A7. 第 0 天四关
+
+```text
+1. 含义回忆
+2. 主动产出
+3. 语境应用
+4. 出口测试
+```
+
+含义回忆连续正确：
+
+| 评级 | 次数 |
+|---|---:|
+| 认识 | 1 |
+| 模糊 | 2 |
+| 陌生 | 3 |
+
+所有中 -> 英拼写统一规则：
+
+```text
+累计正确 2 次
+错误不清零
+错误只增加 attempts / incorrectAttempts
+```
+
+该规则用于：
+
+- 第 0 天主动产出
+- 第 1 天校准第四轮
+- 长期正式复习拼写
+- 第二轮及以后巩固拼写
+
+多义词出口测试必须逐个通过所有次要义项。主义项以 `primary: true` 判断，不能假设索引一定是 0。
+
+第 0 天完成后：
+
+```text
+CardProgress.state = incubating
+calibrationDueOn = 次日
+```
+
+不创建长期 ReviewState。
+
+## A8. 第 1 天四轮校准
+
+| 轮次 | 内容 |
+|---|---|
+| 1 | 英 -> 中 |
+| 2 | 形式选择 |
+| 3 | 语境；多义词逐义项 |
+| 4 | 中 -> 英，累计正确 2 次 |
+
+多义词第三轮分别记录每个次要义项的首答、最终正确和尝试次数。任一义项首次错误必须影响等级。
+
+旧版“答对一个义项就通过第三轮”的活动计划会在读取时重新打开第三轮。
+
+失败判定：
+
+```text
+failureStreak >= 3 -> D -> 次日重校准
+```
+
+“错-对-对”不会判 D。
+
+## A9. 首次正式复习
+
+| 等级 | 间隔 |
+|---|---:|
+| S | 4 天 |
+| A | 2 天 |
+| B | 1 天 |
+| C | 1 天 |
+| D | 次日晚重校准 |
+
+## A10. 长期正式复习
+
+每张卡通常抽两种不同题型：
+
+```text
+meaning
+phraseChoice
+contextChoice
+senseChoice
+spelling
+cloze
+```
+
+- 拼写累计答对 2 次。
+- 任一其他题型错误触发纠错。
+- 当前最多 3 次完整尝试：首轮 + 最多 2 次纠错。
+- 纠错重新抽题和打乱卡序。
+- 第三次仍失败，本次结束并更早复习。
+- 首次错误影响间隔质量，不能被后续纠错覆盖。
+
+间隔：
+
+- 全对：扩大；连续两次高质量成功升级。
+- 部分正确：小幅扩大并降低难度系数。
+- 全错或第三次纠错失败：回到 1 天。
+- 连续两次失败降级。
+
+## A11. 第二轮及以后巩固
+
+解锁必须满足：
+
+- 两条线无今天到期的正式复习。
+- 无今天到期的校准。
+- 无进行中的校准。
+- 当前线无进行中的第 0 天学习。
+- 当前线全部非归档词都已完成第一轮学习。
+- 今天没有因容量延后的正式任务。
+
+第一次巩固是第二轮，之后依次第三、第四轮。
+
+`ReviewPlan.kind = "booster"` 保存：
+
+```text
+boosterRound
+```
+
+`CardProgress` 保存：
+
+```text
+boosterCompletedRounds
+lastBoosterRound
+boosterMistakeCount
+lastBoosterPassed
+lastBoosterAt
+firstRoundWeaknessScore
+```
+
+下一轮：
+
+```text
+max(2, 当前线已学卡最低 boosterCompletedRounds + 1)
+```
+
+每日批量等于当前线每日新学数量，默认固定搭配 6、动词句型 4。
+
+排序：
+
+第二轮：
+
+```text
+firstRoundWeaknessScore DESC
+-> 风险
+-> 更久未巩固
+-> 稳定随机
+```
+
+第三轮及以后：
+
+```text
+boosterMistakeCount DESC
+-> firstRoundWeaknessScore DESC
+-> 风险
+-> 更久未巩固
+-> 稳定随机
+```
+
+`firstRoundWeaknessScore` 是固定快照，包含：
+
+- 校准/临时等级风险
+- 初始评级风险
+- 第 0 天各关卡错误
+- 重试次数
+- fragile 能力项
+
+`boosterMistakeCount` 是最近一轮巩固首轮答错题数。
+
+完成保证：
+
+- 当前轮未完成卡始终优先。
+- 每日只取当前轮尚未完成的卡。
+- 全部完成才进下一轮。
+- 中途退出时只有完成卡增加轮次，未完成卡下次继续优先。
+- 新增词从它的第二轮开始，旧卡不会在同一轮重复。
+
+巩固不创建或修改 ReviewState，不改变正式 grade、interval、nextReviewOn、校准日期。
+
+巩固会更新 skills、lastBoosterAt、boosterMistakeCount、lastBoosterPassed、boosterCompletedRounds、lastBoosterRound。
+
+## A12. 学习线切换
+
+键：
+
+```text
+phrase-memory-2-active-track
+```
+
+URL：
+
+```text
+?track=fixed
+?track=verb-pattern
+```
+
+主动切换会同步 storage、URL 并保留其他查询参数。刷新保持最后选择。
+
+准备和提交期间禁止切换。所有异步加载使用请求代次。
+
+## A13. 数据库
+
+```text
+PhraseMemory2
+```
+
+表：
+
+```text
+phrases
+learningSessions
+cardProgress
+reviewStates
+reviewPlans
+calibrationPlans
+reviewLogs
+importJobs
+```
+
+新增字段均为可选字段，不需要清库或重建对象仓库。
+
+## A14. 关键源码
+
+```text
+src/lib/domain/constants.ts
+src/lib/domain/types.ts
+src/lib/domain/learning-flow.ts
+src/lib/domain/learning-policy.ts
+src/lib/domain/preview-order.ts
+src/lib/domain/review-flow.ts
+src/lib/domain/scheduler.ts
+src/lib/domain/grading.ts
+src/lib/domain/booster-selection.ts
+src/lib/domain/text.ts
+src/lib/domain/date.ts
+
+src/lib/data/db.ts
+src/lib/data/repositories.ts
+src/lib/data/settings.ts
+
+src/lib/hooks/usePersistedTrack.ts
+src/lib/hooks/useLocalDay.ts
+src/lib/hooks/useQuestionScroll.ts
+
+src/lib/import/schema.ts
+src/lib/import/normalize.ts
+src/lib/import/importer.ts
+
+src/app/layout.tsx
+src/app/page.tsx
+src/app/learn/page.tsx
+src/app/review/page.tsx
+src/app/library/page.tsx
+src/app/import/page.tsx
+src/app/profile/page.tsx
+
+src/components/PreviewStudyCard.tsx
+src/components/CalibrationSession.tsx
+src/components/QuickReviewSheet.tsx
+src/components/Sheet.tsx
+src/components/MeaningSenses.tsx
+```
+
+## A15. 测试
+
+```text
+tests/learning-flow.test.ts
+tests/learning-policy.test.ts
+tests/learning-experience.test.ts
+tests/preview-order.test.ts
+tests/four-round-flow.test.ts
+tests/scheduler.test.ts
+tests/long-term.test.ts
+tests/fairness.test.ts
+tests/simulation.test.ts
+tests/booster-flow.test.ts
+tests/booster-selection.test.ts
+tests/booster-multi-round.test.ts
+tests/import.test.ts
+tests/backup.test.ts
+tests/regression-fixes.test.ts
+tests/spelling-target.test.ts
+tests/pwa-config.test.ts
+```
+
+## A16. PWA 与 GitHub Pages
+
+```text
+next.config.ts
+public/sw.js
+src/components/ServiceWorker.tsx
+scripts/prepare-static-export.mjs
+.github/workflows/pages.yml
+```
+
+- 页面网络优先。
+- `_next/static` 文件名内容哈希。
+- 缓存前缀 `phrase-memory-2-`。
+- 构建自动替换 `__BUILD_ID__`。
+- 只清理本应用前缀缓存。
+- CI 执行 typecheck、lint、test、build。
+
+禁止进入构建产物：
+
+```text
+local-data/
+local-preview/
+backup-smoke.json
+node_modules/
+.next/
+out/
+```
+
+## A17. 重构顺序
+
+1. 先补仓储层接口测试。
+2. 按 learning/review/calibration/booster/statistics/backup 拆分 `repositories.ts`。
+3. 保留现有公开导出作为兼容门面。
+4. 把 QuickReview 状态抽成纯 reducer。
+5. 把今日页统计继续下沉到数据层。
+6. 增加 Playwright E2E 和固定测试数据。
+7. 不要在同一个大提交里同时改规则、模型和 UI。
+
+## A18. 不得破坏
+
+- 两条学习线统计、进度和巩固轮次隔离。
+- 校准优先于正式复习。
+- 正式复习优先于巩固。
+- 巩固不创建校准，不改正式复习日期。
+- 拼写累计正确 2 次，错误不清零。
+- 多义词每个次要义项都必须通过。
+- 快闪不写正式学习/复习状态。
+- 私有词库不进入 GitHub 上传包。
+- 不清空现有 IndexedDB。
+
+## A19. 需求确认与修改记录
+
+这一节记录用户在后续对话中明确确认的产品语义，优先级高于前文历史原型描述。
+
+### 1. 初始目标
+
+- 固定搭配和动词句型必须独立学习、独立复习、独立统计。
+- 用户手动导入私有 JSON，源码和 GitHub 包不能内置私有词库。
+- 学习数据保存在当前浏览器 IndexedDB。
+- 最终通过 GitHub Pages 静态发布，手机浏览器可用。
+
+### 2. 第一次完整审计后已修复的问题
+
+- 校准反馈出现后仍能按 Enter 重复提交。
+- 多义词校准只通过一个义项就进入下一轮。
+- “连续失败 3 次”错误地按总尝试次数判断。
+- 另一条线有正式复习时仍可能生成巩固。
+- `?track=` 在刷新后覆盖用户主动切换的学习线。
+- 复习准备存在旧异步任务回写新学习线的风险。
+- 今日页完成数和分母来自不同口径。
+- Service Worker 会删除同源其他项目缓存。
+- 缓存版本依赖手工修改。
+- CI 缺少 lint。
+
+### 3. 拼写规则变更
+
+用户明确要求：
+
+```text
+中 -> 英默写太多了，改为正确默写两次即可
+答错不清零
+```
+
+该规则同步用于第 0 天主动产出、第 1 天校准、长期正式复习和巩固。
+
+### 4. 巩固的产品语义
+
+用户明确确认：
+
+- 第二轮巩固不是正式复习。
+- 当前学习线第一轮全部学完后才出现第二轮。
+- 第二轮按每日新学数量分批，例如每天 10 个。
+- 第二轮会覆盖当前学习线全部已学词，然后进入第三轮。
+- 第三轮、第四轮继续循环，轮次不固定为两轮。
+- 第二轮顺序根据第一轮学习时的相对弱点。
+- 第三轮起根据上一轮巩固中的错误动态调整。
+- 巩固不增加校准，不影响正式复习日期。
+- 巩固是纯额外复习。
+
+用户否定过的方案：
+
+- 不能把巩固当成正式 `ReviewState`。
+- 不能因为今天做完一批新词就让整个学习线尚未学完时提前开启第二轮。
+- 不能只随机抽样而不保证整轮覆盖。
+- 不能只有第二、第三轮，后续轮次必须能继续递增。
+
+### 5. 今日快闪
+
+用户明确要求：
+
+- 今日页增加一个按钮。
+- 可以选择英 -> 中或中 -> 英。
+- 每个今日学习词答对一次即可。
+- 仅用于当天。
+- 使用小卡片弹窗。
+- 空闲时可以随时复习。
+- 不参与校准和正式复习。
+
+实现选择：
+
+- 两个方向分别保存当天 localStorage 进度。
+- 答错不推进，答对一次后移除。
+- 关闭再打开可继续当天进度。
+- 次日自动使用新的日期键。
+- 不写 `ReviewLog`、`CardProgress`、`ReviewState`。
+
+### 6. 交接要求
+
+用户要求：
+
+- 所有当前逻辑、内容、路径和修改记录写入本 Markdown。
+- 新窗口需要能直接基于本文件继续重构。
+- 新窗口不能把前文旧设计误当成当前要求。
+
+### 7. 新窗口必须遵循的冲突处理
+
+发生冲突时，优先级从高到低：
+
+```text
+用户最新明确要求
+-> 本文件 A1-A20 当前交接
+-> 现有 tests/
+-> 前文历史设计
+```
+
+如果最新用户要求会改变学习或复习语义，新窗口必须先向用户确认，不能自行推断。
+
+---
+
+# A20. 2026-11-05 启动、2026-11-06 完成：仓储分层、快速快闪与浏览器门禁
+
+本节记录本轮经用户批准的重构结果。A20 不改 A1–A19 中的产品或学习语义，只改变代码组织、测试基础设施和发布验证方式。
+
+## A20.1 新模块结构
+
+`src/lib/data/repositories.ts` 现在只保留兼容重新导出，不再包含查询、事务或领域实现：
+
+```text
+src/lib/data/repositories.ts
+src/lib/data/repositories/learning.ts
+src/lib/data/repositories/review.ts
+src/lib/data/repositories/calibration.ts
+src/lib/data/repositories/booster.ts
+src/lib/data/repositories/statistics.ts
+src/lib/data/repositories/backup.ts
+src/lib/data/repositories/shared/helpers.ts
+src/lib/data/repositories/shared/progress.ts
+src/lib/data/repositories/shared/workload.ts
+```
+
+职责：
+
+- `learning.ts`：学习会话、预览评级、预览确认、第 0 天四关和完成。
+- `review.ts`：正式复习计划、队列、尝试、纠错和调度完成。
+- `calibration.ts`：第 1 天四轮校准、多义词义项结果和等级完成。
+- `booster.ts`：巩固资格、候选、轮次和计划创建。
+- `statistics.ts`：词库读取、今日页读模型、统计和日志查询。
+- `backup.ts`：完整备份恢复。
+- `shared/progress.ts`：例句使用、义项使用和首轮弱点快照。
+- `shared/workload.ts`：正式工作阻塞快照和下一巩固轮次。
+- `shared/helpers.ts`：短语映射和旧学习会话读取归一化。
+
+依赖边界：
+
+```text
+domain -> 不依赖 React、Dexie 或 data
+statistics -> 只依赖 db、domain 和 shared 读模型
+review -> 不依赖 booster
+booster -> 可单向依赖 review
+页面/组件/import -> 继续通过 repositories.ts 兼容门面导入
+```
+
+## A20.2 关键 Dexie 事务集合
+
+拆分后事务边界保持不变，自动化契约测试固定以下集合：
+
+```text
+ensureLearningSession
+  learningSessions, cardProgress, phrases, reviewStates
+
+预览评级 / 预览确认
+  learningSessions, cardProgress
+
+recordLearningGateAnswer
+  learningSessions, cardProgress, reviewLogs, phrases
+
+ensureReviewPlan
+  reviewPlans, reviewStates, phrases, calibrationPlans, cardProgress
+
+ensureBoosterReviewPlan
+  reviewPlans, cardProgress, reviewStates, phrases,
+  learningSessions, calibrationPlans
+
+ensureCalibrationPlan
+  calibrationPlans, cardProgress, reviewStates, phrases, reviewPlans
+
+recordCalibrationAnswer
+  calibrationPlans, reviewLogs, cardProgress, reviewStates, phrases
+
+recordReviewAnswer
+  reviewPlans, reviewLogs, cardProgress, reviewStates, phrases
+
+restoreBackup
+  phrases, learningSessions, cardProgress, calibrationPlans,
+  reviewStates, reviewPlans, reviewLogs
+```
+
+所有读写仍使用数据库 `PhraseMemory2` 和 IndexedDB schema version 2。没有清库、重建对象仓库或数据库版本升级。
+
+## A20.3 今日页统计
+
+`statistics.ts` 新增纯读模型 `summarizeTodayData()`。今日页的总数、已完成、待学、待复习、正式到期、失败待重试和巩固入口判断统一下沉到该函数。
+
+统计继续使用显式 ID 集合：
+
+```text
+reviewCompletedIds
+reviewFailedIds
+reviewSettledIds
+reviewPendingIds
+```
+
+`reviewSettledIds = reviewCompletedIds + reviewFailedIds` 且不会继续留在 `reviewPendingIds`。
+
+## A20.4 今日快闪状态
+
+今日快闪拆为：
+
+```text
+src/lib/domain/quick-review.ts
+src/lib/data/quick-review-storage.ts
+src/components/QuickReviewSheet.tsx
+```
+
+规则保持：
+
+- English -> 中文和中文 -> English 分开保存。
+- 键仍为 `phrase-memory-2-quick-review:YYYY-MM-DD:en-zh` 和 `phrase-memory-2-quick-review:YYYY-MM-DD:zh-en`。
+- 答错不推进。
+- 答对一次后移除。
+- 关闭后可继续当天进度。
+- 次日自动使用新日期键。
+- 不读取或写入 `ReviewLog`、`CardProgress`、`ReviewState`。
+
+## A20.5 学习线切换和异步保护
+
+新增：
+
+```text
+src/lib/domain/track-selection.ts
+```
+
+保留：
+
+```text
+localStorage key = phrase-memory-2-active-track
+URL = ?track=fixed | ?track=verb-pattern
+```
+
+主动切换继续同步 storage 和 URL，并保留其他查询参数与 hash。学习页和复习页使用请求代次拒绝旧异步结果；加载、开始、准备、预览保存和提交期间禁止切换学习线。
+
+## A20.6 固定测试数据与仓储契约
+
+新增合成 fixture：
+
+```text
+tests/fixtures/phrases.ts
+tests/fixtures/db.ts
+e2e/fixtures/seed.ts
+```
+
+这些 fixture 不依赖 `local-data/`、相邻 `outputs/` 或用户私有词库。
+
+仓储契约测试覆盖：
+
+- 数据库表和 schema version 不变。
+- 所有兼容门面导出仍可用。
+- 每个仓储函数定义只存在一次。
+- Dexie 事务表集合不变。
+- 拆分完成后门面不再包含实现。
+- domain 不依赖 React、Dexie 或 data。
+- statistics 不调用写仓储。
+- review 不反向依赖 booster。
+- `src/lib` 无 import cycle。
+- 拼写累计正确 2 次。
+- 正式复习总尝试上限为 3。
+- 巩固第二轮按首轮弱点，第三轮起按上一轮巩固错误优先。
+- 快闪不写正式状态。
+- 学习线 storage/URL 契约。
+
+## A20.7 Playwright 与浏览器验证
+
+Playwright 固定版本：
+
+```text
+@playwright/test 1.51.1
+```
+
+Windows 本地使用系统 Microsoft Edge (`channel: "msedge"`)；其他平台使用 Playwright Chromium。
+
+GitHub Actions 的 `browser-checks` job 会安装 Chromium，并执行主流程、Pages 子路径和 PWA 双构建检查；Pages 部署依赖该 job 成功。
+
+命令：
+
+```powershell
+npm.cmd run test:e2e
+npm.cmd run test:e2e:pages
+npm.cmd run test:e2e:pwa
+```
+
+已执行的真实浏览器检查：
+
+- 学习线 URL/localStorage 恢复。
+- 快速切换后最终学习线正确。
+- 今日快闪英文/中文方向、答错不推进、当天续做和正式数据隔离。
+- 第 2 轮巩固入口打开，且不创建 `ReviewState`。
+- 320px 无横向溢出，底部五项导航可见。
+- GitHub Pages `/phrase-memory-2/` 子路径可加载，manifest 和 `sw.js` 路径正确。
+- 连续构建 `e2e-cache-a` 与 `e2e-cache-b` 两个不同 Build ID。
+- 浏览器升级后旧 `phrase-memory-2-e2e-cache-a` 被删除，新 cache b 生效。
+- 同源无关缓存 `other-project-v1` 在升级后保留。
+
+## A20.8 验证命令
+
+每个重构阶段均执行过：
+
+```powershell
+npm.cmd run check
+```
+
+最终验证分为三层：
+
+```text
+1. Vitest 单元/集成测试
+2. typecheck + lint + production static build
+3. Playwright 主流程、Pages 子路径和 PWA 双构建缓存升级
+```
+
+对随机或 seeded 流程连续运行多次完整 Vitest，结果必须一致。
+
+## A20.9 数据兼容性
+
+- 数据库名、表和 schema version 未改变。
+- 未删除或重建用户 IndexedDB。
+- 新增仓储模块和纯状态模块不改变持久化记录。
+- `ReviewPlan`、`CardProgress` 等可选字段保持向后兼容。
+- 备份格式仍为 `phrase-memory-backup-3.0`。
+- 测试数据只在合成 fixture 中生成。
+
+## A20.10 剩余风险
+
+- 多标签页同时操作同一 IndexedDB 仍未做跨页冲突合并。
+- Windows 本地 Playwright 使用 Edge，存在平台级句柄滞留风险；本地运行器通过完成标记控制生命周期。CI 使用 Linux Chromium，不依赖该 Windows 行为。
+- Playwright 验证使用合成固定数据，不代表真实私有词库的内容质量。
+- 真实用户的多义词、例句轮换和长期复习体验仍需要持续观察。
+
+## A20.11 最终验证记录
+
+2026-11-06 最终验证：
+
+```text
+Vitest: 31 test files / 117 tests passed
+连续完整 Vitest: 3 次通过，结果稳定
+typecheck: passed
+lint: passed
+production static build: passed
+Playwright main browser checks: passed
+Playwright Pages subpath check: passed
+Playwright PWA two-build cache upgrade check: passed
+```
+
+最终生产静态构建给出的缓存版本会随构建内容自动变化，不应手工写回本文。
+

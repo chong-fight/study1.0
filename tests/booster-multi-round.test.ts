@@ -7,7 +7,10 @@ import {
 } from "@/lib/data/repositories";
 import { DEFAULT_SETTINGS } from "@/lib/domain/constants";
 import { addDays } from "@/lib/domain/date";
-import { createCardProgress } from "@/lib/domain/learning-flow";
+import {
+  createCardProgress,
+  createLearningSession,
+} from "@/lib/domain/learning-flow";
 import { createInitialReviewState } from "@/lib/domain/scheduler";
 import { importPhrases } from "@/lib/import/importer";
 import { normalizeImportJson } from "@/lib/import/normalize";
@@ -55,6 +58,8 @@ describe("multiple booster rounds", () => {
           await db.cardProgress.put({
             ...progress,
             lastBoosterAt: (index + 1) * 100,
+            boosterCompletedRounds: plan.boosterRound ?? 2,
+            lastBoosterRound: plan.boosterRound ?? 2,
             updatedAt: (index + 1) * 100,
           });
         }
@@ -71,7 +76,8 @@ describe("multiple booster rounds", () => {
       "2026-01-04",
       settings,
     );
-    expect(new Set(fourth.phraseIds)).toEqual(new Set(batches[0]));
+    expect(fourth.boosterRound).toBe(3);
+    expect(fourth.phraseIds).toHaveLength(4);
   });
 
   it("keeps all learned cards rotating evenly across 30 booster days", async () => {
@@ -88,6 +94,8 @@ describe("multiple booster rounds", () => {
           await db.cardProgress.put({
             ...progress,
             lastBoosterAt: dayIndex + 1,
+            boosterCompletedRounds: plan.boosterRound ?? 2,
+            lastBoosterRound: plan.boosterRound ?? 2,
             updatedAt: dayIndex + 1,
           });
         }
@@ -97,6 +105,39 @@ describe("multiple booster rounds", () => {
     expect(counts.size).toBe(12);
     expect(Math.min(...counts.values())).toBe(10);
     expect(Math.max(...counts.values())).toBe(10);
+  });
+
+  it("puts last-round booster mistakes first in the next round", async () => {
+    const settings = { ...DEFAULT_SETTINGS, fixedNewLimit: 4 };
+    const phrases = await db.phrases.toArray();
+    const weakId = phrases[7].id;
+    for (let dayIndex = 0; dayIndex < 3; dayIndex += 1) {
+      const plan = await ensureBoosterReviewPlan(
+        "fixed",
+        addDays("2026-01-01", dayIndex),
+        settings,
+      );
+      for (const id of plan.phraseIds) {
+        const progress = await db.cardProgress.get(id);
+        if (!progress) continue;
+        await db.cardProgress.put({
+          ...progress,
+          lastBoosterAt: dayIndex + 1,
+          lastBoosterRound: plan.boosterRound ?? 2,
+          boosterCompletedRounds: plan.boosterRound ?? 2,
+          boosterMistakeCount: id === weakId ? 2 : 0,
+          updatedAt: dayIndex + 1,
+        });
+      }
+    }
+
+    const nextRound = await ensureBoosterReviewPlan(
+      "fixed",
+      "2026-01-04",
+      settings,
+    );
+    expect(nextRound.boosterRound).toBe(3);
+    expect(nextRound.phraseIds[0]).toBe(weakId);
   });
 
   it("gives formal due reviews priority over another booster round", async () => {
@@ -158,6 +199,8 @@ describe("multiple booster rounds", () => {
       await db.cardProgress.put({
         ...progress,
         lastBoosterAt: 1,
+        boosterCompletedRounds: dayOne.boosterRound ?? 2,
+        lastBoosterRound: dayOne.boosterRound ?? 2,
         updatedAt: 1,
       });
     }
@@ -173,7 +216,7 @@ describe("multiple booster rounds", () => {
     expect(dayTwo.phraseIds).not.toContain(completedId);
   });
 
-  it("does not start a booster while unseen new words still exist", async () => {
+  it("does not start a booster before today's learning session", async () => {
     const phrase = (await db.phrases.toArray())[0];
     await db.cardProgress.delete(phrase.id);
 
@@ -192,5 +235,40 @@ describe("multiple booster rounds", () => {
     ).find((item) => item.trackId === "fixed");
     expect(data?.boosterPhrases).toEqual([]);
     expect(data?.newPhrases.map((item) => item.id)).toContain(phrase.id);
+  });
+
+  it("waits for the full first learning pass before starting a booster", async () => {
+    const phrases = await db.phrases.toArray();
+    await db.cardProgress.delete(phrases[1].id);
+    const completedSession = createLearningSession(
+      "fixed",
+      [phrases[0]],
+      "2026-01-01",
+      1,
+    );
+    await db.learningSessions.put({
+      ...completedSession,
+      stage: "completed",
+      status: "completed",
+      completedAt: 2,
+    });
+
+    const plan = await ensureBoosterReviewPlan(
+      "fixed",
+      "2026-01-01",
+      { ...DEFAULT_SETTINGS, fixedNewLimit: 4 },
+    );
+    expect(plan.kind).toBe("scheduled");
+    expect(plan.phraseIds).toEqual([]);
+
+    const data = (
+      await getTodayData(
+        { ...DEFAULT_SETTINGS, fixedNewLimit: 4 },
+        "2026-01-01",
+      )
+    ).find((item) => item.trackId === "fixed");
+    expect(data?.newPhrases.map((item) => item.id)).not.toContain(
+      phrases[0].id,
+    );
   });
 });
