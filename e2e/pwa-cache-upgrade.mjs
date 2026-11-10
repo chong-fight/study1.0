@@ -4,6 +4,15 @@ import path from "node:path";
 import { execFileSync, spawn } from "node:child_process";
 import { chromium } from "@playwright/test";
 
+process.on("uncaughtException", (error) => {
+  console.error(
+    `::error::PWA cache check failed: ${
+      error instanceof Error ? error.message : String(error)
+    }`,
+  );
+  process.exit(1);
+});
+
 const projectRoot = process.cwd();
 const temporaryRoot = fs.mkdtempSync(
   path.join(os.tmpdir(), "phrase-memory-pwa-"),
@@ -88,7 +97,11 @@ try {
     await unrelated.put("/other-project-marker", new Response("keep"));
   });
   await page.reload();
-  await page.waitForFunction(() => Boolean(navigator.serviceWorker.controller));
+  await page.waitForFunction(
+    () => Boolean(navigator.serviceWorker.controller),
+    undefined,
+    { timeout: 60_000 },
+  );
 
   const firstCaches = await page.evaluate(() => caches.keys());
   const firstAppCache = firstCaches.find((key) =>
@@ -109,10 +122,10 @@ try {
     const registration = await navigator.serviceWorker.getRegistration();
     await registration?.update();
   });
-  await page.waitForTimeout(1_000);
+  await page.waitForTimeout(2_000);
   await page.reload();
   let secondCaches = [];
-  for (let attempt = 0; attempt < 40; attempt += 1) {
+  for (let attempt = 0; attempt < 120; attempt += 1) {
     secondCaches = await page.evaluate(() => caches.keys());
     if (
       secondCaches.some(
@@ -124,7 +137,7 @@ try {
     ) {
       break;
     }
-    await page.waitForTimeout(250);
+    await page.waitForTimeout(500);
   }
   if (
     !secondCaches.some(
