@@ -73,7 +73,11 @@ try {
 
   browser = await chromium.launch({
     headless: true,
-    ...(process.platform === "win32" ? { channel: "msedge" } : {}),
+    ...(process.env.PLAYWRIGHT_CHANNEL
+      ? { channel: process.env.PLAYWRIGHT_CHANNEL }
+      : process.platform === "win32"
+        ? { channel: "msedge" }
+        : {}),
   });
   const context = await browser.newContext();
   const page = await context.newPage();

@@ -1808,9 +1808,9 @@ Playwright 固定版本：
 @playwright/test 1.51.1
 ```
 
-Windows 本地使用系统 Microsoft Edge (`channel: "msedge"`)；其他平台使用 Playwright Chromium。
+Windows 本地使用系统 Microsoft Edge (`channel: "msedge"`)；其他平台默认使用 Playwright Chromium，CI 直接使用 Ubuntu runner 预装的 Google Chrome (`PLAYWRIGHT_CHANNEL=chrome`)。
 
-GitHub Actions 的 `browser-checks` job 会安装 Chromium，并执行主流程、Pages 子路径和 PWA 双构建检查；Pages 部署依赖该 job 成功。
+GitHub Actions 的 `browser-checks` job 会使用 runner 预装的 Chrome，并执行主流程、Pages 子路径和 PWA 双构建检查；Pages 部署依赖该 job 成功。
 
 命令：
 
