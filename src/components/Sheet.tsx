@@ -2,6 +2,7 @@
 
 import { X } from "lucide-react";
 import { useEffect, useId, useRef, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 interface SheetProps {
   title: string;
@@ -50,7 +51,7 @@ export default function Sheet({ title, onClose, children }: SheetProps) {
     };
   }, [onClose]);
 
-  return (
+  const sheet = (
     <div
       className="sheet-backdrop"
       onMouseDown={(event) => {
@@ -81,4 +82,6 @@ export default function Sheet({ title, onClose, children }: SheetProps) {
       </section>
     </div>
   );
+
+  return createPortal(sheet, document.body);
 }

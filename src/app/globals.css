@@ -127,7 +127,7 @@ a {
 .page {
   min-height: calc(100dvh - var(--nav-height));
   padding-bottom: calc(var(--nav-height) + 22px + env(safe-area-inset-bottom, 0px));
-  animation: page-in 200ms ease-out both;
+  animation: page-in 200ms ease-out;
 }
 
 @keyframes page-in {

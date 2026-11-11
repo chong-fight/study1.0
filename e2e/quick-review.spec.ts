@@ -5,6 +5,47 @@ import {
   seedTestData,
 } from "./fixtures/seed";
 
+test.use({ viewport: { width: 390, height: 700 } });
+
+test("keeps the quick review sheet inside a long mobile page", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const today = await localToday(page);
+  const phrases = Array.from({ length: 20 }, (_, index) =>
+    makeFixturePhrase("fixed", `mobile quick review ${index}`),
+  );
+  await seedTestData(page, {
+    phrases,
+    learningSessions: [
+      {
+        id: `${today}:fixed`,
+        date: today,
+        trackId: "fixed",
+        phraseIds: phrases.map((phrase) => phrase.id),
+        previewedPhraseIds: phrases.map((phrase) => phrase.id),
+        stage: "day0",
+        currentRound: 1,
+        roundPassedIds: { "1": [], "2": [], "3": [], "4": [] },
+        status: "active",
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ],
+  });
+
+  await page.getByRole("button", { name: "今日快闪" }).click();
+  const sheet = page.getByRole("dialog", { name: "今日快闪" });
+  await expect(sheet).toBeVisible();
+  expect(
+    await sheet.evaluate((element) => element.closest("main.page") === null),
+  ).toBe(true);
+  const box = await sheet.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.y).toBeGreaterThanOrEqual(0);
+  expect(box!.y + box!.height).toBeLessThanOrEqual(701);
+});
+
 test("keeps quick review progress by direction and avoids formal writes", async ({
   page,
 }) => {
